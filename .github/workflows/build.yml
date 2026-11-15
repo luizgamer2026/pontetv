@@ -23,10 +23,6 @@ jobs:
           mkdir out
           cp phone/build/outputs/apk/release/*.apk out/PonteTV-Celular.apk
           cp tv/build/outputs/apk/release/*.apk out/PonteTV-AndroidTV.apk
-      - uses: actions/upload-artifact@v4
-        with:
-          name: PonteTV-APKs
-          path: out/*.apk
       - name: Publicar Release
         env:
           GH_TOKEN: ${{ github.token }}
