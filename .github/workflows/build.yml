@@ -1,8 +1,11 @@
-name: Build APKs
+name: Build APK
 
 on:
   push:
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -16,20 +19,17 @@ jobs:
           java-version: 17
 
       - uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: "8.7"
 
-      - name: Compilar celular + TV
-        run: gradle --no-daemon --stacktrace :phone:assembleDebug :tv:assembleDebug
+      - name: Permissão do gradlew
+        run: chmod +x ./gradlew
 
-      - name: APK do celular
-        uses: actions/upload-artifact@v4
-        with:
-          name: PonteTV-Celular-APK
-          path: phone/build/outputs/apk/debug/*.apk
+      - name: Compilar APK
+        run: ./gradlew assembleDebug
 
-      - name: APK da Android TV
-        uses: actions/upload-artifact@v4
+      - name: Publicar APK em Release
+        uses: softprops/action-gh-release@v2
         with:
-          name: PonteTV-AndroidTV-APK
-          path: tv/build/outputs/apk/debug/*.apk
+          tag_name: build-${{ github.run_number }}
+          name: APK build ${{ github.run_number }}
+          files: app/build/outputs/apk/debug/*.apk
+          prerelease: true
