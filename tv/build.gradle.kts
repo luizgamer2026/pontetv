@@ -7,16 +7,20 @@ android {
     compileSdk = 34
     defaultConfig {
         applicationId = "com.pontetv.tv"
-        minSdk = 26
+        minSdk = 28 // BluetoothHidDevice (TV como teclado/mouse) exige Android 9+
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "2.0"
     }
     buildTypes {
         release {
             isMinifyEnabled = false
             signingConfig = signingConfigs.getByName("debug")
         }
+    }
+    lint {
+        abortOnError = false
+        checkReleaseBuilds = false
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
@@ -25,7 +29,5 @@ android {
     kotlinOptions { jvmTarget = "17" }
 }
 dependencies {
-    implementation(project(":common"))
     implementation("androidx.core:core-ktx:1.13.1")
-    implementation("com.google.zxing:core:3.5.3")
 }

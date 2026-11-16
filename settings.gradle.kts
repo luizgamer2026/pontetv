@@ -6,4 +6,4 @@ dependencyResolutionManagement {
     repositories { google(); mavenCentral() }
 }
 rootProject.name = "PonteTV"
-include(":common", ":phone", ":tv")
+include(":phone", ":tv")
