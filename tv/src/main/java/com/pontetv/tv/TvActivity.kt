@@ -105,16 +105,16 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
         }
         // mouse capturado (cursor some da TV) -> celular
         root.setOnCapturedPointerListener { _, e ->
-            if (engaged) { InputWatcher.noteMouse(e.device?.name); InputBridge.captured(e) }
+            if (engaged) { if (InputWatcher.mouse == null) InputWatcher.noteMouse(e.device?.name); InputBridge.captured(e) }
             true
         }
         // TVs que não liberam a captura: eixos relativos
         root.setOnGenericMotionListener { _, e ->
-            if (e.isFromSource(InputDevice.SOURCE_MOUSE)) InputWatcher.noteMouse(e.device?.name)
+            if (InputWatcher.mouse == null && e.isFromSource(InputDevice.SOURCE_MOUSE)) InputWatcher.noteMouse(e.device?.name)
             if (engaged && !root.hasPointerCapture() && e.isFromSource(InputDevice.SOURCE_MOUSE)) { InputBridge.softRelative(e); true } else false
         }
         root.setOnTouchListener { _, e ->
-            if (e.isFromSource(InputDevice.SOURCE_MOUSE)) InputWatcher.noteMouse(e.device?.name)
+            if (InputWatcher.mouse == null && e.isFromSource(InputDevice.SOURCE_MOUSE)) InputWatcher.noteMouse(e.device?.name)
             if (engaged && !root.hasPointerCapture() && e.isFromSource(InputDevice.SOURCE_MOUSE)) { InputBridge.softRelative(e); true } else false
         }
 
@@ -218,15 +218,35 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
         hud.visibility = View.VISIBLE
         root.pointerIcon = PointerIcon.getSystemIcon(this, PointerIcon.TYPE_NULL)
         root.requestFocus()
-        root.requestPointerCapture()
+        capturePointer()
         updateHud()
+        main.removeCallbacks(hudTick)
+        main.postDelayed(hudTick, 1000)
         main.postDelayed({ if (engaged) updateHud() }, 1300)
+    }
+
+    /** Captura o mouse e pede ao Android que entregue cada movimento assim que chega (sem juntar por quadro de tela). */
+    private fun capturePointer() {
+        root.requestPointerCapture()
+        if (Build.VERSION.SDK_INT >= 31) {
+            try { root.requestUnbufferedDispatch(InputDevice.SOURCE_MOUSE_RELATIVE or InputDevice.SOURCE_MOUSE) } catch (_: Exception) {}
+        }
+    }
+
+    /** A cada segundo atualiza o HUD com o diagnóstico do envio Bluetooth. */
+    private val hudTick = object : Runnable {
+        override fun run() {
+            if (!engaged) return
+            updateHud()
+            main.postDelayed(this, 1000)
+        }
     }
 
     private fun release(byUser: Boolean) {
         if (!engaged) return
         engaged = false
         InputBridge.capturing = false
+        main.removeCallbacks(hudTick)
         if (byUser) manualOff = true
         InputBridge.releaseAll()
         if (root.hasPointerCapture()) root.releasePointerCapture()
@@ -243,6 +263,7 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
         val soft = engaged && !root.hasPointerCapture()
         hudSub.text = "${h?.let { HidLink.nameOf(it) } ?: ""}\n\n" +
             "Teclado da TV: ${InputWatcher.kb ?: "não detectado"}\nMouse da TV: ${InputWatcher.mouse ?: "não detectado"}" +
+            "\nBluetooth: ${HidLink.statRate} envios/s · envio mais lento ${HidLink.statWorstMs} ms" +
             (if (soft) "\n(modo alternativo de mouse: esta TV não liberou a captura)" else "") +
             "\n\nF8 solta o teclado e o mouse para usar na TV (ou VOLTAR do controle remoto)"
     }
@@ -299,6 +320,7 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
         if (engaged) {
             engaged = false
             InputBridge.capturing = false
+            main.removeCallbacks(hudTick)
             InputBridge.releaseAll()
             if (root.hasPointerCapture()) root.releasePointerCapture()
             root.pointerIcon = null
@@ -314,7 +336,7 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
         super.onWindowFocusChanged(hasFocus)
         if (hasFocus) {
             immersive()
-            if (engaged && !root.hasPointerCapture()) root.requestPointerCapture()
+            if (engaged && !root.hasPointerCapture()) capturePointer()
             else update()
         }
     }

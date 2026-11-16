@@ -1,15 +1,11 @@
 package com.pontetv.tv
 
-import android.os.Handler
-import android.os.Looper
-import android.os.SystemClock
 import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.MotionEvent
 
 /** Converte o teclado e o mouse USB da TV em relatórios HID para o celular. Só roda na thread principal. */
 object InputBridge {
-    private val main = Handler(Looper.getMainLooper())
     private val keys = ArrayList<Int>()
     private var mods = 0
     private var buttons = 0
@@ -17,9 +13,6 @@ object InputBridge {
     private var accY = 0f
     private var accV = 0f
     private var accH = 0f
-    private var lastFlush = 0L
-    private var pending = false
-    private val flushRun = Runnable { pending = false; flush() }
 
     /** true enquanto o teclado/mouse da TV estão controlando o celular. */
     @Volatile var capturing = false
@@ -64,12 +57,12 @@ object InputBridge {
                 var dy = e.y
                 for (i in 0 until e.historySize) { dx += e.getHistoricalX(i); dy += e.getHistoricalY(i) }
                 accX += dx; accY += dy
-                schedule()
+                flush()
             }
             MotionEvent.ACTION_SCROLL -> {
                 accV += e.getAxisValue(MotionEvent.AXIS_VSCROLL)
                 accH += e.getAxisValue(MotionEvent.AXIS_HSCROLL)
-                schedule()
+                flush()
             }
         }
         buttons(e)
@@ -85,12 +78,12 @@ object InputBridge {
                 }
                 accX += e.getAxisValue(MotionEvent.AXIS_RELATIVE_X)
                 accY += e.getAxisValue(MotionEvent.AXIS_RELATIVE_Y)
-                schedule()
+                flush()
             }
             MotionEvent.ACTION_SCROLL -> {
                 accV += e.getAxisValue(MotionEvent.AXIS_VSCROLL)
                 accH += e.getAxisValue(MotionEvent.AXIS_HSCROLL)
-                schedule()
+                flush()
             }
         }
         buttons(e)
@@ -105,15 +98,10 @@ object InputBridge {
         }
     }
 
-    private fun schedule() {
-        val now = SystemClock.uptimeMillis()
-        if (now - lastFlush >= 8) flush()
-        else if (!pending) { pending = true; main.postDelayed(flushRun, 8) }
-    }
-
+    /** Manda o movimento acumulado na hora; quem dita o ritmo e soma o excesso é o HidLink. */
     private fun flush() {
         var guard = 0
-        while (guard++ < 16) {
+        while (guard++ < 64) {
             val ix = accX.toInt().coerceIn(-127, 127)
             val iy = accY.toInt().coerceIn(-127, 127)
             val iv = accV.toInt().coerceIn(-127, 127)
@@ -122,7 +110,6 @@ object InputBridge {
             accX -= ix; accY -= iy; accV -= iv; accH -= ih
             sendMouse(ix, iy, iv, ih)
         }
-        lastFlush = SystemClock.uptimeMillis()
     }
 
     private fun sendMouse(x: Int, y: Int, v: Int, h: Int) {
@@ -134,8 +121,6 @@ object InputBridge {
 
     /** Solta todas as teclas e botões no celular (ao parar de controlar, trocar de app ou desconectar). */
     fun releaseAll() {
-        main.removeCallbacks(flushRun)
-        pending = false
         keys.clear(); mods = 0; buttons = 0
         accX = 0f; accY = 0f; accV = 0f; accH = 0f
         sendKeys()

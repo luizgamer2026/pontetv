@@ -36,6 +36,20 @@ Módulos: `phone` (Android 10+, pareia e mostra "Teclado e mouse conectados") ·
 * A imagem do celular na TV não faz parte do app (use o espelhamento nativo/cabo, se quiser).
 * Velocidade do mouse: configuração de ponteiro do próprio celular.
 
+## Latência (v2.1)
+
+* **Envio em thread própria** (prioridade alta) com fila curta: o evento do mouse/teclado sai na hora, sem timer de 8 ms.
+* **Movimento nunca acumula atraso:** o mouse é enviado a no máximo ~125 Hz; se o Bluetooth não der conta, o movimento
+  que chega no intervalo é *somado* ao relatório que ainda não saiu (o cursor chega no mesmo lugar, sem fila crescendo).
+  Teclas e botões nunca esperam esse intervalo.
+* **Keepalive:** com o controle ativo, a cada 80 ms vai um relatório vazio de mouse (o Android ignora) para o link
+  Bluetooth não entrar no modo de economia, que atrasa o primeiro movimento/tecla depois de uma pausa.
+* **QoS Bluetooth** de baixa latência no registro HID (se a TV recusar, registra de novo sem ele).
+* **Mouse sem lote por quadro** (Android 12+: `requestUnbufferedDispatch`) e sem consulta de dispositivo a cada evento.
+* O HUD mostra `Bluetooth: N envios/s · envio mais lento X ms` para diagnosticar.
+
+Ajustes finos em `HidLink.kt`: `MOVE_GAP_NS` (ritmo do mouse; 11 ms ≈ 90 Hz se o Bluetooth da TV engasgar) e `KEEPALIVE_NS`.
+
 ## Compilar
 
 Push no GitHub → Actions → Release com `PonteTV-Celular.apk` e `PonteTV-AndroidTV.apk`.
