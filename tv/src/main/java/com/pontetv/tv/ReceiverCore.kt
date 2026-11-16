@@ -32,6 +32,8 @@ object ReceiverCore {
         fun onVideoSize(w: Int, h: Int)
         fun onPairing()
         fun onDevices()
+        fun onAutoGame(game: Boolean)
+        fun onApps(json: String)
     }
 
     private lateinit var app: Context
@@ -62,6 +64,8 @@ object ReceiverCore {
 
     val decoder = VideoDecoder { requestKeyframe() }
     val audio = AudioPlayer()
+    val udp = UdpIn(Proto.UDP_PORT) { onUdpFirst() }
+    @Volatile var udpPort = 0
     val statFrames = AtomicInteger()
     val statBytes = AtomicLong()
 
@@ -132,6 +136,7 @@ object ReceiverCore {
         ss.reuseAddress = true
         try { ss.bind(InetSocketAddress(Proto.DEFAULT_PORT)) } catch (e: Exception) { ss.bind(InetSocketAddress(0)) }
         port = ss.localPort
+        udpPort = try { udp.start() } catch (e: Exception) { 0 }
         pairingChanged()
         registerNsd()
         while (true) {
@@ -194,7 +199,7 @@ object ReceiverCore {
                 val dm = app.resources.displayMetrics
                 val maxLong = maxOf(dm.widthPixels, dm.heightPixels).coerceAtMost(1920)
                 w.send(Proto.T_HELLO_OK, JSONObject().put("id", prefs.tvId).put("name", tvName)
-                    .put("kind", kind).put("maxLong", maxLong).toString().toByteArray())
+                    .put("kind", kind).put("maxLong", maxLong).put("udpPort", udpPort).toString().toByteArray())
                 session(w, name)
             } else w.close()
         } catch (e: Exception) {
@@ -209,6 +214,7 @@ object ReceiverCore {
         phoneName = name
         ClockSync.has = false
         AvSync.reset()
+        udp.reset()
         val my = ++seq
         w.socket.soTimeout = 6000
         post(RxState.STREAMING)
@@ -246,6 +252,8 @@ object ReceiverCore {
                         ClockSync.deltaNs = ByteBuffer.wrap(p.data).long
                         ClockSync.has = true
                     }
+                    Proto.T_GAME -> { val g = p.data.isNotEmpty() && p.data[0].toInt() == 1; main.post { listener?.onAutoGame(g) } }
+                    Proto.T_APPS -> { val js = String(p.data); main.post { listener?.onApps(js) } }
                     Proto.T_PING -> w.send(Proto.T_PONG, p.data, Bin.long(System.nanoTime()))
                     Proto.T_STOP -> { phoneStopped = true; break }
                 }
@@ -279,7 +287,7 @@ object ReceiverCore {
                 AvSync.update()
                 latMs = decoder.latencyMs(); audMs = audio.latencyMs()
                 val bb = ByteBuffer.allocate(20).putInt(latMs).putInt(audMs).putInt(f)
-                    .putInt(decoder.takeDrops()).putInt(AvSync.offsetMs)
+                    .putInt(decoder.takeDrops() + udp.takeLost()).putInt(AvSync.offsetMs)
                 w.send(Proto.T_STATS, bb.array())
             }
         } catch (e: Exception) { w.close() }
@@ -288,6 +296,21 @@ object ReceiverCore {
     fun sendInput(b: ByteArray) {
         val w = active ?: return
         writer.execute { try { w.send(Proto.T_INPUT, b) } catch (e: Exception) { w.close() } }
+    }
+
+    private fun onUdpFirst() {
+        val w = active ?: return
+        writer.execute { try { w.send(Proto.T_UDP_OK) } catch (_: Exception) {} }
+    }
+
+    fun sendCommand(json: String) {
+        val w = active ?: return
+        writer.execute { try { w.send(Proto.T_CMD, json.toByteArray()) } catch (e: Exception) { w.close() } }
+    }
+
+    fun requestApps() {
+        val w = active ?: return
+        writer.execute { try { w.send(Proto.T_APPS_REQ) } catch (e: Exception) { w.close() } }
     }
 
     fun requestKeyframe() {

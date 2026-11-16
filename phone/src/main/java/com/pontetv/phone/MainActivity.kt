@@ -86,8 +86,8 @@ class MainActivity : ComponentActivity() {
 
         if (Session.active) {
             val c = UI.card(this, 0xFF14533F.toInt())
-            c.addView(UI.text(this, "● Transmitindo para ${Session.tvName}", 16f, UI.TEXT, true))
-            c.addView(UI.text(this, "Toque para ver o estado e encerrar", 12f, UI.GREEN))
+            c.addView(UI.text(this, (if (Session.state == Session.State.STANDBY) "● Em espera · ${Session.tvName}" else "● Transmitindo para ${Session.tvName}"), 16f, UI.TEXT, true))
+            c.addView(UI.text(this, "Toque para ver o estado ou reconectar sem novo aviso de captura", 12f, UI.GREEN))
             UI.pressable(c) { startActivity(Intent(this, ConnectedActivity::class.java)) }
             add(c, 18)
         }

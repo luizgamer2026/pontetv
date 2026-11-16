@@ -21,6 +21,9 @@ class VideoDecoder(private val requestKey: () -> Unit) {
     private val drops = AtomicInteger()
 
     fun rawLatencyMs(): Float = vRaw
+
+    /** Quadro perdido na rede: descarta os P seguintes até o próximo quadro-chave. */
+    fun markLoss() { needKey = true; drops.incrementAndGet(); askKey() }
     fun latencyMs(): Int = if (vRaw < 0) -1 else (vRaw + AvSync.videoDelayMs).toInt()
     fun takeDrops(): Int = drops.getAndSet(0)
 

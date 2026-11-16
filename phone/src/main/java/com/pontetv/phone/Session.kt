@@ -5,7 +5,7 @@ import android.os.Looper
 import java.util.concurrent.CopyOnWriteArrayList
 
 object Session {
-    enum class State { IDLE, CONNECTING, STREAMING, RECONNECTING, ERROR }
+    enum class State { IDLE, CONNECTING, STREAMING, RECONNECTING, STANDBY, ERROR }
 
     @Volatile var state = State.IDLE
     @Volatile var message = ""
@@ -21,6 +21,8 @@ object Session {
     @Volatile var e2eMs = -1      // captura -> TV (medido com relógios sincronizados)
     @Volatile var audMs = -1
     @Volatile var tvFps = 0
+    @Volatile var tvDrops = 0
+    @Volatile var transport = ""
     @Volatile var tvKb: String? = null
     @Volatile var tvMouse: String? = null
 
@@ -34,7 +36,7 @@ object Session {
     fun reset() {
         state = State.IDLE; message = ""; tvName = ""; rtt = -1; fps = 0; kbps = 0
         targetKbps = 0; width = 0; height = 0; drops = 0; game = false
-        e2eMs = -1; audMs = -1; tvFps = 0; tvKb = null; tvMouse = null
+        e2eMs = -1; audMs = -1; tvFps = 0; tvDrops = 0; transport = ""; tvKb = null; tvMouse = null
         changed()
     }
 

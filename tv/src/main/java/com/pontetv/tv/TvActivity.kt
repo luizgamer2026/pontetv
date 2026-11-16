@@ -3,12 +3,15 @@ package com.pontetv.tv
 import android.Manifest
 import android.app.Activity
 import android.content.pm.PackageManager
+import android.graphics.BitmapFactory
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.text.TextUtils
+import android.util.Base64
 import android.view.Gravity
 import android.view.InputDevice
 import android.view.KeyEvent
@@ -17,10 +20,14 @@ import android.view.SurfaceHolder
 import android.view.View
 import android.view.WindowManager
 import android.widget.FrameLayout
+import android.widget.GridLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
+import org.json.JSONArray
+import org.json.JSONObject
 
 class TvActivity : Activity(), ReceiverCore.Listener, SurfaceHolder.Callback, StreamSurface.Callbacks {
     private val main = Handler(Looper.getMainLooper())
@@ -39,9 +46,18 @@ class TvActivity : Activity(), ReceiverCore.Listener, SurfaceHolder.Callback, St
     private lateinit var statsText: TextView
     private lateinit var hintText: TextView
     private lateinit var lostText: TextView
+    private lateinit var taskbar: LinearLayout
+    private lateinit var appsOverlay: FrameLayout
+    private lateinit var appsTitle: TextView
+    private lateinit var appsGrid: GridLayout
     private var showStats = false
     private var captured = false
     private var softGame = false
+    private var gameFg = false        // o celular informou: app em primeiro plano é um jogo
+    private var autoEntered = false   // modo jogo foi ligado automaticamente
+    private var manualOff = false     // usuário saiu do modo jogo com F8 enquanto o jogo está aberto
+    private var taskPinned = false
+    private var appsLoaded = false
     private var lastBack = 0L
     private var lastQr = ""
 
@@ -68,14 +84,18 @@ class TvActivity : Activity(), ReceiverCore.Listener, SurfaceHolder.Callback, St
             setBackgroundColor(0x99000000.toInt()); setPadding(dp(10), dp(6), dp(10), dp(6)); visibility = View.GONE
         }
         stream.addView(statsText, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.START))
-        hintText = label("F8 modo jogo  ·  F9 estatísticas  ·  Ctrl+Shift+Q encerrar  ·  VOLTAR do controle 2x encerra", 14f, 0xFFFFFFFF.toInt()).apply {
+        hintText = label("F8 modo jogo  |  F9 estatisticas  |  F10 barra de tarefas  |  Ctrl+Shift+Q encerrar", 14f, 0xFFFFFFFF.toInt()).apply {
             setBackgroundColor(0x99000000.toInt()); setPadding(dp(14), dp(8), dp(14), dp(8))
         }
-        stream.addView(hintText, FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply { bottomMargin = dp(24) })
-        lostText = label("Conexão perdida — aguardando o celular reconectar…", 24f, 0xFFFFB020.toInt()).apply {
+        stream.addView(hintText, FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply { bottomMargin = dp(70) })
+        lostText = label("Conexao perdida - aguardando o celular reconectar...", 24f, 0xFFFFB020.toInt()).apply {
             setBackgroundColor(0xCC000000.toInt()); setPadding(dp(24), dp(14), dp(24), dp(14)); visibility = View.GONE
         }
         stream.addView(lostText, FrameLayout.LayoutParams(-2, -2, Gravity.CENTER))
+        taskbar = buildTaskbar()
+        stream.addView(taskbar, FrameLayout.LayoutParams(-1, dp(54), Gravity.BOTTOM))
+        appsOverlay = buildApps()
+        stream.addView(appsOverlay, FrameLayout.LayoutParams(-1, -1))
         root.addView(stream, FrameLayout.LayoutParams(-1, -1))
         setContentView(root)
         immersive()
@@ -111,16 +131,16 @@ class TvActivity : Activity(), ReceiverCore.Listener, SurfaceHolder.Callback, St
         val left = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         left.addView(label("PonteTV", 40f, 0xFFEAF0FF.toInt(), true))
         left.addView(label("Receptor de tela", 18f, 0xFF8FA0C8.toInt()))
-        left.addView(label("1. No celular, abra o PonteTV e escolha TV\n2. Escaneie o QR code ou digite o código", 16f, 0xFFEAF0FF.toInt()),
+        left.addView(label("1. No celular, abra o PonteTV e escolha TV\n2. Escaneie o QR code ou digite o codigo", 16f, 0xFFEAF0FF.toInt()),
             LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(20) })
         devText = label("", 16f, 0xFFEAF0FF.toInt())
         left.addView(devText, LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(16) })
-        statusText = label("Aguardando conexão do celular…", 18f, 0xFF22D3A6.toInt(), true)
+        statusText = label("Aguardando conexao do celular...", 18f, 0xFF22D3A6.toInt(), true)
         left.addView(statusText, LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(16) })
         netText = label("", 13f, 0xFF8FA0C8.toInt())
         left.addView(netText, LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(4) })
         val btns = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        val newCode = tvButton("Novo código") { ReceiverCore.rotate() }
+        val newCode = tvButton("Novo codigo") { ReceiverCore.rotate() }
         directBtn = tvButton("Wi-Fi Direct") { toggleDirect() }
         forgetBtn = tvButton("Esquecer celulares") { ReceiverCore.clearAuthorized() }
         btns.addView(newCode)
@@ -140,9 +160,115 @@ class TvActivity : Activity(), ReceiverCore.Listener, SurfaceHolder.Callback, St
         right.addView(card)
         pinText = label("", 36f, 0xFFEAF0FF.toInt(), true).apply { typeface = Typeface.MONOSPACE; letterSpacing = 0.15f }
         right.addView(pinText, LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(12) })
-        right.addView(label("código de pareamento", 13f, 0xFF8FA0C8.toInt()))
+        right.addView(label("codigo de pareamento", 13f, 0xFF8FA0C8.toInt()))
         root.addView(right, LinearLayout.LayoutParams(-2, -2).apply { leftMargin = dp(32) })
         return root
+    }
+
+    // ---------- barra de tarefas e lançador de apps ----------
+    private val hideTask = Runnable { if (!taskPinned && ::taskbar.isInitialized) taskbar.visibility = View.GONE }
+
+    private fun keepTaskbar() {
+        taskbar.visibility = View.VISIBLE
+        main.removeCallbacks(hideTask)
+        if (!taskPinned) main.postDelayed(hideTask, 2500)
+    }
+
+    private fun cmd(c: String, pkg: String? = null) {
+        val o = JSONObject().put("cmd", c)
+        if (pkg != null) o.put("pkg", pkg)
+        ReceiverCore.sendCommand(o.toString())
+    }
+
+    private fun tbButton(text: String, onClick: () -> Unit): TextView {
+        val v = label(text, 15f, 0xFFFFFFFF.toInt(), true)
+        v.gravity = Gravity.CENTER
+        v.setPadding(dp(18), 0, dp(18), 0)
+        v.isClickable = true
+        v.setOnClickListener { onClick() }
+        v.setOnHoverListener { view, e ->
+            when (e.actionMasked) {
+                MotionEvent.ACTION_HOVER_ENTER -> view.setBackgroundColor(0x665B8CFF)
+                MotionEvent.ACTION_HOVER_EXIT -> view.setBackgroundColor(0)
+            }
+            false
+        }
+        return v
+    }
+
+    private fun buildTaskbar(): LinearLayout {
+        val bar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER
+            setBackgroundColor(0xEE101830.toInt()); visibility = View.GONE
+            setOnHoverListener { _, _ -> keepTaskbar(); false }
+        }
+        val items = listOf<Pair<String, () -> Unit>>(
+            "Inicio" to { cmd("home") },
+            "Voltar" to { cmd("back") },
+            "Recentes" to { cmd("recents") },
+            "Apps" to { openApps() },
+            "Avisos" to { cmd("notifications") },
+            "Encerrar" to { ReceiverCore.stopStreaming() }
+        )
+        for ((t, f) in items) bar.addView(tbButton(t, f), LinearLayout.LayoutParams(-2, -1))
+        return bar
+    }
+
+    private fun buildApps(): FrameLayout {
+        val o = FrameLayout(this).apply { setBackgroundColor(0xF0101830.toInt()); visibility = View.GONE; isClickable = true }
+        o.setOnClickListener { closeApps() }
+        val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(40), dp(24), dp(40), dp(24)) }
+        appsTitle = label("Apps do celular", 22f, 0xFFEAF0FF.toInt(), true)
+        col.addView(appsTitle)
+        val sv = ScrollView(this)
+        appsGrid = GridLayout(this).apply { columnCount = 7 }
+        sv.addView(appsGrid)
+        col.addView(sv, LinearLayout.LayoutParams(-1, 0, 1f).apply { topMargin = dp(12) })
+        o.addView(col, FrameLayout.LayoutParams(-1, -1))
+        return o
+    }
+
+    private fun openApps() {
+        appsOverlay.visibility = View.VISIBLE
+        if (!appsLoaded) { appsTitle.text = "Carregando apps do celular..."; ReceiverCore.requestApps() }
+    }
+
+    private fun closeApps() { appsOverlay.visibility = View.GONE }
+
+    override fun onApps(json: String) {
+        try {
+            val arr = JSONArray(json)
+            appsGrid.removeAllViews()
+            for (i in 0 until arr.length()) {
+                val a = arr.getJSONObject(i)
+                val tile = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_HORIZONTAL; setPadding(dp(6), dp(8), dp(6), dp(8)) }
+                val img = ImageView(this)
+                val ic = a.optString("icon")
+                if (ic.isNotEmpty()) {
+                    val bytes = Base64.decode(ic, Base64.DEFAULT)
+                    img.setImageBitmap(BitmapFactory.decodeByteArray(bytes, 0, bytes.size))
+                }
+                tile.addView(img, LinearLayout.LayoutParams(dp(52), dp(52)))
+                tile.addView(label(a.optString("label"), 12f, 0xFFEAF0FF.toInt()).apply {
+                    maxLines = 1; ellipsize = TextUtils.TruncateAt.END; gravity = Gravity.CENTER
+                }, LinearLayout.LayoutParams(dp(110), -2))
+                val pkg = a.optString("pkg")
+                tile.isClickable = true
+                tile.setOnClickListener { cmd("launch", pkg); closeApps() }
+                tile.setOnHoverListener { v, e ->
+                    when (e.actionMasked) {
+                        MotionEvent.ACTION_HOVER_ENTER -> v.setBackgroundColor(0x555B8CFF)
+                        MotionEvent.ACTION_HOVER_EXIT -> v.setBackgroundColor(0)
+                    }
+                    false
+                }
+                appsGrid.addView(tile, GridLayout.LayoutParams().apply { width = dp(120); height = -2 })
+            }
+            appsLoaded = true
+            appsTitle.text = "Apps do celular (${arr.length()}) - clique para abrir, Esc fecha"
+        } catch (e: Exception) {
+            appsTitle.text = "Nao foi possivel carregar os apps"
+        }
     }
 
     // ---------- Wi-Fi Direct ----------
@@ -154,7 +280,7 @@ class TvActivity : Activity(), ReceiverCore.Listener, SurfaceHolder.Callback, St
             requestPermissions(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION), 7)
             return
         }
-        statusText.text = "Criando grupo Wi-Fi Direct…"
+        statusText.text = "Criando grupo Wi-Fi Direct..."
         DirectGroup.start(this) {
             if (DirectGroup.error.isNotEmpty()) Toast.makeText(this, DirectGroup.error, Toast.LENGTH_LONG).show()
             refreshPairing()
@@ -164,7 +290,7 @@ class TvActivity : Activity(), ReceiverCore.Listener, SurfaceHolder.Callback, St
     override fun onRequestPermissionsResult(code: Int, perms: Array<out String>, res: IntArray) {
         super.onRequestPermissionsResult(code, perms, res)
         if (code == 7 && res.isNotEmpty() && res[0] == PackageManager.PERMISSION_GRANTED) toggleDirect()
-        else if (code == 7) Toast.makeText(this, "Wi-Fi Direct precisa da permissão de localização (exigência do Android).", Toast.LENGTH_LONG).show()
+        else if (code == 7) Toast.makeText(this, "Wi-Fi Direct precisa da permissao de localizacao (exigencia do Android).", Toast.LENGTH_LONG).show()
     }
 
     private fun refreshPairing() {
@@ -177,9 +303,9 @@ class TvActivity : Activity(), ReceiverCore.Listener, SurfaceHolder.Callback, St
         pinText.text = if (p.length == 6) p.substring(0, 3) + " " + p.substring(3) else p
         val ips = ReceiverCore.ips()
         netText.text = when {
-            DirectGroup.active -> "Wi-Fi Direct: ${DirectGroup.ssid}  ·  ${DirectGroup.ownerIp}:${ReceiverCore.port}\nEscaneie o QR no celular (ele troca de rede sozinho)"
-            ips.isEmpty() -> "Sem rede local — conecte a TV ao Wi-Fi/cabo ou ligue o Wi-Fi Direct"
-            else -> "Rede: ${ips.first()}:${ReceiverCore.port}  ·  ${ReceiverCore.tvName}"
+            DirectGroup.active -> "Wi-Fi Direct: ${DirectGroup.ssid}  |  ${DirectGroup.ownerIp}:${ReceiverCore.port}\nEscaneie o QR no celular (ele troca de rede sozinho)"
+            ips.isEmpty() -> "Sem rede local - conecte a TV ao Wi-Fi/cabo ou ligue o Wi-Fi Direct"
+            else -> "Rede: ${ips.first()}:${ReceiverCore.port}  |  ${ReceiverCore.tvName}"
         }
         forgetBtn.text = "Esquecer celulares (${ReceiverCore.authorizedCount()})"
         directBtn.text = if (DirectGroup.active) "Desligar Wi-Fi Direct" else "Wi-Fi Direct"
@@ -191,7 +317,22 @@ class TvActivity : Activity(), ReceiverCore.Listener, SurfaceHolder.Callback, St
 
     override fun onDevices() {
         val kb = ReceiverCore.kbName; val ms = ReceiverCore.mouseName
-        devText.text = "Teclado da TV: ${if (kb != null) "✔ $kb" else "✖ não detectado"}\nMouse da TV: ${if (ms != null) "✔ $ms" else "✖ não detectado"}"
+        devText.text = "Teclado da TV: ${if (kb != null) "detectado ($kb)" else "nao detectado"}\nMouse da TV: ${if (ms != null) "detectado ($ms)" else "nao detectado"}"
+        // mouse plugado com um jogo aberto: entra no modo jogo
+        if (gameFg && ms != null && !captured && !softGame && !manualOff && ReceiverCore.state == RxState.STREAMING) {
+            autoEntered = true; startGame()
+        }
+    }
+
+    /** O celular avisa: jogo em primeiro plano. Com mouse detectado, esconde o cursor e liga o modo jogo. */
+    override fun onAutoGame(game: Boolean) {
+        gameFg = game
+        if (game) {
+            if (ReceiverCore.mouseName != null && !captured && !softGame && !manualOff) { autoEntered = true; startGame() }
+        } else {
+            manualOff = false
+            if (autoEntered) { autoEntered = false; stopGame() }
+        }
     }
 
     override fun onVideoSize(w: Int, h: Int) { layoutBox() }
@@ -209,11 +350,12 @@ class TvActivity : Activity(), ReceiverCore.Listener, SurfaceHolder.Callback, St
         when (s) {
             RxState.WAITING -> {
                 if (captured) surface.releasePointerCapture()
-                if (softGame) { softGame = false }
+                softGame = false; gameFg = false; autoEntered = false; manualOff = false; appsLoaded = false
+                closeApps(); taskbar.visibility = View.GONE
                 stream.visibility = View.GONE
                 waiting.visibility = View.VISIBLE
                 lostText.visibility = View.GONE
-                statusText.text = "Aguardando conexão do celular…"
+                statusText.text = "Aguardando conexao do celular..."
                 refreshPairing()
             }
             RxState.STREAMING -> {
@@ -235,11 +377,11 @@ class TvActivity : Activity(), ReceiverCore.Listener, SurfaceHolder.Callback, St
     private val statsTick = object : Runnable {
         override fun run() {
             if (showStats && ReceiverCore.state != RxState.WAITING) {
-                val lat = if (ReceiverCore.latMs >= 0) "${ReceiverCore.latMs} ms" else "—"
+                val lat = if (ReceiverCore.latMs >= 0) "${ReceiverCore.latMs} ms" else "-"
                 val mode = if (captured) "modo jogo" else if (softGame) "modo jogo (alt.)" else "modo normal"
-                statsText.text = "${ReceiverCore.videoW}×${ReceiverCore.videoH} · ${ReceiverCore.fpsNow} fps · ${"%.1f".format(ReceiverCore.mbpsNow)} Mbps · " +
-                    "captura→TV $lat · A/V ${AvSync.offsetMs} ms · $mode\n" +
-                    "Teclado ${if (ReceiverCore.kbName != null) "✔" else "✖"}  Mouse ${if (ReceiverCore.mouseName != null) "✔" else "✖"}"
+                statsText.text = "${ReceiverCore.videoW}x${ReceiverCore.videoH} | ${ReceiverCore.fpsNow} fps | ${"%.1f".format(ReceiverCore.mbpsNow)} Mbps | " +
+                    "captura-TV $lat | A/V ${AvSync.offsetMs} ms | $mode\n" +
+                    "Teclado ${if (ReceiverCore.kbName != null) "sim" else "nao"}  Mouse ${if (ReceiverCore.mouseName != null) "sim" else "nao"}"
             }
             main.postDelayed(this, 1000)
         }
@@ -281,36 +423,52 @@ class TvActivity : Activity(), ReceiverCore.Listener, SurfaceHolder.Callback, St
         if (softGame) { InputSender.softRelative(e); return }
         val (x, y) = InputSender.absolute(e, v)
         cursor.setPos(x * v.width, y * v.height)
+        if (y > 0.95f) keepTaskbar() // mouse na borda de baixo mostra a barra de tarefas
     }
 
     override fun onCaptured(e: MotionEvent) { InputSender.captured(e) }
 
     override fun onCapture(has: Boolean) {
         captured = has
-        if (has) softGame = false
+        if (has) { softGame = false; taskbar.visibility = View.GONE }
         cursor.visibility = if (has || softGame) View.INVISIBLE else View.VISIBLE
         InputSender.mode(has || softGame)
     }
 
-    /** F8: tenta a captura de ponteiro; se a TV não liberar, cai no modo alternativo por eixos relativos. */
-    private fun toggleGame() {
-        if (softGame) {
-            softGame = false
-            cursor.visibility = View.VISIBLE
-            InputSender.mode(false)
-            return
-        }
-        if (surface.hasPointerCapture()) { surface.releasePointerCapture(); return }
+    /** Liga o modo jogo: captura de ponteiro; se a TV não liberar, usa o modo alternativo por eixos relativos. */
+    private fun startGame() {
+        if (appsOverlay.visibility == View.VISIBLE) closeApps()
         surface.requestFocus()
         surface.requestPointerCapture()
         main.postDelayed({
             if (!surface.hasPointerCapture() && ReceiverCore.state != RxState.WAITING && !softGame) {
                 softGame = true
                 cursor.visibility = View.INVISIBLE
+                taskbar.visibility = View.GONE
                 InputSender.mode(true)
-                Toast.makeText(this, "Captura de mouse indisponível nesta TV: usando modo jogo alternativo.", Toast.LENGTH_LONG).show()
+                if (!autoEntered) Toast.makeText(this, "Captura de mouse indisponivel nesta TV: usando modo jogo alternativo.", Toast.LENGTH_LONG).show()
             }
         }, 1200)
+    }
+
+    private fun stopGame() {
+        if (softGame) {
+            softGame = false
+            cursor.visibility = View.VISIBLE
+            InputSender.mode(false)
+        }
+        if (surface.hasPointerCapture()) surface.releasePointerCapture()
+    }
+
+    private fun toggleGame() {
+        if (captured || softGame) {
+            manualOff = gameFg
+            autoEntered = false
+            stopGame()
+        } else {
+            manualOff = false
+            startGame()
+        }
     }
 
     // ---------- teclado ----------
@@ -321,10 +479,20 @@ class TvActivity : Activity(), ReceiverCore.Listener, SurfaceHolder.Callback, St
             e.unicodeChar != 0 || e.keyCode == KeyEvent.KEYCODE_ESCAPE)
         if (kb) {
             val down = e.action == KeyEvent.ACTION_DOWN
-            if (e.keyCode == KeyEvent.KEYCODE_F8 || e.keyCode == KeyEvent.KEYCODE_F9) {
+            if (appsOverlay.visibility == View.VISIBLE) {
+                if (down && e.keyCode == KeyEvent.KEYCODE_ESCAPE) closeApps()
+                return true
+            }
+            if (e.keyCode == KeyEvent.KEYCODE_F8 || e.keyCode == KeyEvent.KEYCODE_F9 || e.keyCode == KeyEvent.KEYCODE_F10) {
                 if (down && e.repeatCount == 0) {
-                    if (e.keyCode == KeyEvent.KEYCODE_F8) toggleGame()
-                    else { showStats = !showStats; statsText.visibility = if (showStats) View.VISIBLE else View.GONE }
+                    when (e.keyCode) {
+                        KeyEvent.KEYCODE_F8 -> toggleGame()
+                        KeyEvent.KEYCODE_F9 -> { showStats = !showStats; statsText.visibility = if (showStats) View.VISIBLE else View.GONE }
+                        else -> {
+                            taskPinned = !taskPinned
+                            if (taskPinned) { taskbar.visibility = View.VISIBLE; main.removeCallbacks(hideTask) } else keepTaskbar()
+                        }
+                    }
                 }
                 return true
             }
@@ -337,9 +505,10 @@ class TvActivity : Activity(), ReceiverCore.Listener, SurfaceHolder.Callback, St
         }
         if (e.keyCode == KeyEvent.KEYCODE_BACK) {
             if (e.action == KeyEvent.ACTION_UP) {
+                if (appsOverlay.visibility == View.VISIBLE) { closeApps(); return true }
                 val now = SystemClock.uptimeMillis()
                 if (now - lastBack < 2000) ReceiverCore.stopStreaming()
-                else { lastBack = now; Toast.makeText(this, "Pressione VOLTAR de novo para encerrar a transmissão", Toast.LENGTH_SHORT).show() }
+                else { lastBack = now; Toast.makeText(this, "Pressione VOLTAR de novo para encerrar a transmissao", Toast.LENGTH_SHORT).show() }
             }
             return true
         }

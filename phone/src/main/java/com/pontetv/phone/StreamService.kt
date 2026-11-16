@@ -19,14 +19,21 @@ import com.pontetv.common.Proto
 import kotlin.math.max
 import kotlin.math.min
 
+/**
+ * Serviço de transmissão. A permissão de captura de tela (aviso do Android) é pedida UMA vez:
+ * quando a TV encerra ou a conexão cai, o serviço fica em ESPERA mantendo a MediaProjection;
+ * reconectar não pede o aviso de novo. "Encerrar" (notificação/app) finaliza tudo.
+ */
 class StreamService : Service(), Link.Callback, ScreenCapture.Sink {
     companion object {
         const val ACT_STOP = "com.pontetv.phone.STOP"
+        const val ACT_CONNECT = "com.pontetv.phone.CONNECT"
         const val X_ID = "id"
         const val X_CODE = "code"
         const val X_DATA = "data"
         private const val MIN_KBPS = 1500
         @Volatile var running = false
+        @Volatile var current: StreamService? = null
 
         fun stop(c: Context) {
             c.startService(Intent(c, StreamService::class.java).setAction(ACT_STOP))
@@ -37,9 +44,10 @@ class StreamService : Service(), Link.Callback, ScreenCapture.Sink {
     private var projection: MediaProjection? = null
     private var capture: ScreenCapture? = null
     private var audio: AudioCapture? = null
-    private var link: Link? = null
+    @Volatile private var link: Link? = null
     private var done = false
     private var userMaxLong = 1280
+    @Volatile private var lastCfg: Triple<Int, Int, ByteArray>? = null
 
     private val rcThread = HandlerThread("rate").also { it.start() }
     private val rc = Handler(rcThread.looper)
@@ -52,23 +60,24 @@ class StreamService : Service(), Link.Callback, ScreenCapture.Sink {
 
     override fun onBind(i: Intent?): IBinder? = null
 
+    fun sendControl(type: Int, data: ByteArray) { link?.sendControl(type, data) }
+
     override fun onStartCommand(i: Intent?, flags: Int, startId: Int): Int {
-        if (i?.action == ACT_STOP) { shutdown(true); return START_NOT_STICKY }
+        when (i?.action) {
+            ACT_STOP -> { shutdown(true); return START_NOT_STICKY }
+            ACT_CONNECT -> {
+                if (running && !done) Prefs(this).findPaired(i.getStringExtra(X_ID) ?: "")?.let { connect(it) }
+                return START_NOT_STICKY
+            }
+        }
         if (running || i == null) return START_NOT_STICKY
         val prefs = Prefs(this)
         val tv = prefs.findPaired(i.getStringExtra(X_ID) ?: "")
         @Suppress("DEPRECATION") val data = i.getParcelableExtra<Intent>(X_DATA)
         if (tv == null || data == null) { stopSelf(); return START_NOT_STICKY }
 
-        startFg(tv.name)
-        running = true; done = false
-        Session.reset()
-        Session.state = Session.State.CONNECTING
-        Session.tvName = tv.name
-        Session.changed()
-        target = prefs.bitrate; bitrate = target; level = 0
-        userMaxLong = prefs.maxLong
-
+        startForeground(1, notification("Conectando a ${tv.name}"), ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
+        running = true; done = false; current = this
         try {
             val mpm = getSystemService(MediaProjectionManager::class.java)
             val proj = mpm.getMediaProjection(i.getIntExtra(X_CODE, 0), data)
@@ -76,33 +85,71 @@ class StreamService : Service(), Link.Callback, ScreenCapture.Sink {
             proj.registerCallback(object : MediaProjection.Callback() {
                 override fun onStop() { main.post { shutdown(true) } }
             }, main)
-
-            val cap = ScreenCapture(applicationContext, proj, this, prefs.maxLong, prefs.fps, bitrate)
+            val cap = ScreenCapture(applicationContext, proj, this, prefs.maxLong, prefs.fps, prefs.bitrate)
             capture = cap
-
-            val l = Link(tv.host, tv.port, prefs.deviceId, prefs.deviceName, tv.key, this)
-            link = l
             cap.start()
-
-            if (prefs.audio && checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
-                val a = AudioCapture(proj) { pts, d -> link?.offerAudio(pts, d) }
-                if (a.start()) { audio = a; l.setAudioConfig(AudioCapture.RATE, AudioCapture.CH) }
-            }
-            l.start()
-            rc.postDelayed(tick, 1000)
+            connect(tv)
         } catch (e: Exception) {
             fail("Falha ao iniciar a captura: ${e.message}")
         }
         return START_NOT_STICKY
     }
 
+    private fun connect(tv: Paired) {
+        val prefs = Prefs(this)
+        rc.removeCallbacksAndMessages(null)
+        link?.stop(false)
+        audio?.stop(); audio = null
+        Session.reset()
+        Session.state = Session.State.CONNECTING
+        Session.tvName = tv.name
+        Session.changed()
+        target = prefs.bitrate; bitrate = target; level = 0; stable = 0; lowCount = 0
+        userMaxLong = prefs.maxLong
+        postNotif("Conectando a ${tv.name}")
+        val cap = capture ?: return
+        val proj = projection ?: return
+        cap.setBitrate(bitrate)
+        if (cap.paused) cap.resume()
+        cap.setScale(1f)
+
+        val l = Link(tv.host, tv.port, prefs.deviceId, prefs.deviceName, tv.key, this)
+        link = l
+        lastCfg?.let { l.setVideoConfig(it.first, it.second, it.third) }
+        if (prefs.audio && checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+            val a = AudioCapture(proj) { pts, d -> link?.offerAudio(pts, d) }
+            if (a.start()) { audio = a; l.setAudioConfig(AudioCapture.RATE, AudioCapture.CH) }
+        }
+        l.start()
+        rc.postDelayed(tick, 1000)
+    }
+
+    /** ESPERA: libera encoder/áudio/conexão, mantém a permissão de captura. */
+    private fun standby(msg: String) {
+        if (done) return
+        rc.removeCallbacksAndMessages(null)
+        link?.stop(false); link = null
+        audio?.stop(); audio = null
+        capture?.pause()
+        lastCfg = null
+        InputAccessibilityService.instance?.reset()
+        Session.state = Session.State.STANDBY
+        Session.message = msg
+        Session.game = false; Session.rtt = -1; Session.kbps = 0; Session.fps = 0
+        Session.e2eMs = -1; Session.audMs = -1; Session.tvKb = null; Session.tvMouse = null
+        Session.changed()
+        postNotif("Em espera — abra o PonteTV e escolha a TV (sem novo aviso de captura)")
+    }
+
     // ---- Link.Callback ----
     override fun onConnected(tvName: String, tvMaxLong: Int) {
-        // a TV informa a resolução do painel: nunca transmitir acima dela (poupa decoder e RAM da TV)
+        // a TV informa a resolução do painel: nunca transmitir acima dela
         if (tvMaxLong > 0) capture?.setMaxLong(min(userMaxLong, tvMaxLong))
         Session.state = Session.State.STREAMING
         Session.tvName = tvName
         capture?.requestKeyFrame()
+        InputAccessibilityService.instance?.resendGame()
+        postNotif("Transmitindo para $tvName")
         Session.changed()
     }
 
@@ -121,21 +168,30 @@ class StreamService : Service(), Link.Callback, ScreenCapture.Sink {
     }
 
     override fun onTvStats(latMs: Int, audMs: Int, fps: Int, drops: Int) {
-        Session.e2eMs = latMs; Session.audMs = audMs; Session.tvFps = fps
+        Session.e2eMs = latMs; Session.audMs = audMs; Session.tvFps = fps; Session.tvDrops = drops
     }
 
     override fun onTvDevices(kb: String?, mouse: String?) {
         Session.tvKb = kb; Session.tvMouse = mouse; Session.changed()
     }
 
+    override fun onCommand(json: String) { InputAccessibilityService.instance?.postCommand(json) }
+
+    override fun onAppsRequest() {
+        Thread {
+            try { link?.sendControl(Proto.T_APPS, AppsList.build(applicationContext).toByteArray()) } catch (_: Exception) {}
+        }.start()
+    }
+
     override fun onKeyframeRequest() { capture?.requestKeyFrame() }
 
-    override fun onRemoteStop() { main.post { shutdown(false) } }
+    override fun onRemoteStop() { main.post { standby("A TV encerrou a transmissão") } }
 
-    override fun onGiveUp(reason: String) { main.post { fail(reason) } }
+    override fun onGiveUp(reason: String) { main.post { standby(reason) } }
 
     // ---- ScreenCapture.Sink ----
     override fun onConfig(w: Int, h: Int, csd: ByteArray) {
+        lastCfg = Triple(w, h, csd)
         Session.width = w; Session.height = h
         link?.setVideoConfig(w, h, csd)
     }
@@ -149,6 +205,7 @@ class StreamService : Service(), Link.Callback, ScreenCapture.Sink {
             val l = link ?: return
             val st = l.takeStats(1f)
             Session.kbps = st.kbps; Session.fps = st.fps; Session.rtt = st.rtt; Session.drops = st.drops
+            Session.transport = l.transport
             capture?.let { Session.width = it.outW; Session.height = it.outH }
             if (Session.state == Session.State.STREAMING) adapt(st)
             Session.targetKbps = bitrate
@@ -159,7 +216,7 @@ class StreamService : Service(), Link.Callback, ScreenCapture.Sink {
 
     private fun adapt(st: LinkStats) {
         val cap = capture ?: return
-        val congested = st.drops > 0 || st.maxQ >= 4 || st.rtt > 120 || Session.e2eMs > 300
+        val congested = st.drops > 0 || st.maxQ >= 4 || st.rtt > 120 || Session.e2eMs > 300 || Session.tvDrops >= 2
         if (congested) {
             stable = 0
             if (bitrate > MIN_KBPS) {
@@ -186,6 +243,7 @@ class StreamService : Service(), Link.Callback, ScreenCapture.Sink {
     private fun shutdown(sendStop: Boolean) {
         if (done) return
         done = true
+        current = null
         rc.removeCallbacksAndMessages(null)
         rcThread.quitSafely()
         link?.stop(sendStop)
@@ -207,7 +265,7 @@ class StreamService : Service(), Link.Callback, ScreenCapture.Sink {
         super.onDestroy()
     }
 
-    private fun startFg(name: String) {
+    private fun notification(text: String): Notification {
         val nm = getSystemService(NotificationManager::class.java)
         nm.createNotificationChannel(NotificationChannel("stream", "Transmissão", NotificationManager.IMPORTANCE_LOW))
         val stopPi = PendingIntent.getService(
@@ -217,15 +275,22 @@ class StreamService : Service(), Link.Callback, ScreenCapture.Sink {
             this, 2, Intent(this, CalibrateActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
             PendingIntent.FLAG_IMMUTABLE
         )
+        val openPi = PendingIntent.getActivity(
+            this, 3, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE
+        )
         @Suppress("DEPRECATION")
-        val n = Notification.Builder(this, "stream")
+        return Notification.Builder(this, "stream")
             .setSmallIcon(android.R.drawable.ic_media_play)
             .setContentTitle("PonteTV")
-            .setContentText("Transmitindo para $name")
+            .setContentText(text)
+            .setContentIntent(openPi)
             .setOngoing(true)
             .addAction(0, "Calibrar controles", calPi)
             .addAction(0, "Encerrar", stopPi)
             .build()
-        startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
+    }
+
+    private fun postNotif(text: String) {
+        getSystemService(NotificationManager::class.java).notify(1, notification(text))
     }
 }

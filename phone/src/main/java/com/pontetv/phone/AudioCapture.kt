@@ -24,7 +24,7 @@ class AudioCapture(private val projection: MediaProjection, private val sink: (L
                 .build()
             val fmt = AudioFormat.Builder().setEncoding(AudioFormat.ENCODING_PCM_16BIT)
                 .setSampleRate(RATE).setChannelMask(AudioFormat.CHANNEL_IN_STEREO).build()
-            val chunk = RATE / 50 * CH * 2 // 20 ms
+            val chunk = RATE / 200 * CH * 2 // 5 ms (960 bytes: cabe num datagrama UDP)
             val min = AudioRecord.getMinBufferSize(RATE, AudioFormat.CHANNEL_IN_STEREO, AudioFormat.ENCODING_PCM_16BIT)
             val r = AudioRecord.Builder().setAudioFormat(fmt)
                 .setBufferSizeInBytes(maxOf(min, chunk * 4))

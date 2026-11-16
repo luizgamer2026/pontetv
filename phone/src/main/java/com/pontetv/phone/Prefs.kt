@@ -34,6 +34,11 @@ class Prefs(ctx: Context) {
     var sens: Float
         get() = sp.getFloat("sens", 2f)
         set(v) { sp.edit().putFloat("sens", v).apply() }
+    var extraGamesRaw: String
+        get() = sp.getString("extraGames", "") ?: ""
+        set(v) { sp.edit().putString("extraGames", v).apply() }
+    fun extraGames(): Set<String> =
+        extraGamesRaw.split(",", " ", "\n").map { it.trim() }.filter { it.isNotEmpty() }.toSet()
     var keymap: String?
         get() = sp.getString("keymap", null)
         set(v) { sp.edit().putString("keymap", v).apply() }

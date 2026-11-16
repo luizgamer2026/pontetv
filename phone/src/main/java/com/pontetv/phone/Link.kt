@@ -28,6 +28,8 @@ class Link(
         fun onConnected(tvName: String, tvMaxLong: Int)
         fun onTvStats(latMs: Int, audMs: Int, fps: Int, drops: Int)
         fun onTvDevices(kb: String?, mouse: String?)
+        fun onCommand(json: String)
+        fun onAppsRequest()
         fun onLost(reason: String)
         fun onInput(data: ByteArray)
         fun onKeyframeRequest()
@@ -43,6 +45,15 @@ class Link(
     @Volatile var rttMs = -1
     private val q = LinkedBlockingDeque<Out>()
     private val samples = ArrayList<Pair<Long, Long>>() // (rtt, delta) para sincronizar relógios
+    @Volatile private var udp: UdpOut? = null
+    @Volatile private var useUdp = false
+    @Volatile private var udpOk = false
+    @Volatile private var udpStart = 0L
+    val transport: String get() = if (useUdp) "UDP" else "TCP"
+
+    fun sendControl(type: Int, data: ByteArray) {
+        if (wire != null) q.add(Out(type, data, ByteArray(0), false))
+    }
     @Volatile private var cfgVideo: Pair<ByteArray, ByteArray>? = null
     @Volatile private var cfgAudio: ByteArray? = null
 
@@ -83,6 +94,13 @@ class Link(
         if (wire == null) { waitKey = true; return }
         frames.incrementAndGet()
         if (waitKey && !key) { drops.incrementAndGet(); return }
+        if (useUdp) {
+            if (key) waitKey = false
+            if (udpStart == 0L) udpStart = System.nanoTime()
+            udp?.sendFrame(pts, key, data)
+            bytes.addAndGet(data.size.toLong())
+            return
+        }
         var vc = 0
         for (o in q) if (o.video) vc++
         if (vc > maxQ) maxQ = vc
@@ -97,9 +115,10 @@ class Link(
 
     fun offerAudio(pts: Long, data: ByteArray) {
         if (wire == null) return
+        if (useUdp) { udp?.sendAudio(pts, data); bytes.addAndGet(data.size.toLong()); return }
         var ac = 0
         for (o in q) if (!o.video && o.type == Proto.T_AUDIO_DATA) ac++
-        if (ac >= 20) {
+        if (ac >= 80) {
             val it = q.iterator()
             while (it.hasNext()) { val o = it.next(); if (o.type == Proto.T_AUDIO_DATA) { it.remove(); break } }
         }
@@ -139,6 +158,9 @@ class Link(
                 wire = ww
                 cfgVideo?.let { ww.send(Proto.T_VIDEO_CONFIG, it.first, it.second) }
                 cfgAudio?.let { ww.send(Proto.T_AUDIO_CONFIG, it) }
+                val up = j.optInt("udpPort", 0)
+                udp?.close(); udp = null; useUdp = false; udpOk = false; udpStart = 0L
+                if (up > 0) { try { udp = UdpOut(host, up); useUdp = true } catch (_: Exception) {} }
                 cb.onConnected(j.optString("name", host), j.optInt("maxLong", 0))
                 Thread({ writer(ww) }, "link-w").apply { isDaemon = true; start() }
                 Thread({ pinger(ww) }, "link-p").apply { isDaemon = true; start() }
@@ -148,6 +170,8 @@ class Link(
                 reason = e.message ?: e.javaClass.simpleName
             }
             wire = null
+            useUdp = false
+            udp?.close(); udp = null
             w?.close()
             if (!running) break
             cb.onLost(reason)
@@ -171,6 +195,9 @@ class Link(
         try {
             while (running && wire === w) {
                 w.send(Proto.T_PING, Bin.long(System.nanoTime()))
+                if (useUdp && !udpOk && udpStart != 0L && System.nanoTime() - udpStart > 3_000_000_000L) {
+                    useUdp = false; waitKey = true; cb.onKeyframeRequest() // UDP não chegou: volta para TCP
+                }
                 Thread.sleep(1000)
             }
         } catch (e: Exception) { w.close() }
@@ -193,6 +220,9 @@ class Link(
                         w.send(Proto.T_CLOCK, Bin.long(best.second))
                     }
                 }
+                Proto.T_UDP_OK -> udpOk = true
+                Proto.T_CMD -> cb.onCommand(String(p.data))
+                Proto.T_APPS_REQ -> cb.onAppsRequest()
                 Proto.T_STATS -> if (p.data.size >= 16) {
                     val bb = ByteBuffer.wrap(p.data)
                     cb.onTvStats(bb.int, bb.int, bb.int, bb.int)

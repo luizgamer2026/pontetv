@@ -44,6 +44,19 @@ class SettingsActivity : ComponentActivity() {
         }
         c.addView(sb, UI.lp(this, top = 8))
         col.addView(c, UI.lp(this, top = 14))
+        val g = UI.card(this)
+        g.addView(UI.text(this, "Apps tratados como jogo (extra)", 14f, UI.TEXT, true))
+        g.addView(UI.text(this, "Jogos com categoria \"Jogo\" já são detectados. Para outros, digite os pacotes separados por vírgula (ex.: com.mojang.minecraftpe).", 12f, UI.MUTED))
+        val et = android.widget.EditText(this).apply {
+            setText(prefs.extraGamesRaw); setTextColor(UI.TEXT); setHintTextColor(UI.MUTED); hint = "pacote1, pacote2"
+            addTextChangedListener(object : android.text.TextWatcher {
+                override fun afterTextChanged(s: android.text.Editable?) { prefs.extraGamesRaw = s?.toString() ?: "" }
+                override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+                override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+            })
+        }
+        g.addView(et, UI.lp(this, top = 8))
+        col.addView(g, UI.lp(this, top = 14))
         setContentView(sv)
     }
 

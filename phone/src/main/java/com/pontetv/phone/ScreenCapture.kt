@@ -41,6 +41,7 @@ class ScreenCapture(
     @Volatile var outH = 0
     @Volatile private var configSent = false
     @Volatile private var stopped = false
+    @Volatile var paused = false
     private val dpi = ctx.resources.displayMetrics.densityDpi
 
     private val listener = object : DisplayManager.DisplayListener {
@@ -85,7 +86,7 @@ class ScreenCapture(
     }
 
     private fun applySize() {
-        if (stopped) return
+        if (stopped || paused) return
         val (w, h) = size()
         if (w == outW && h == outH) return
         val old = encoder; val oldS = inSurface
@@ -115,6 +116,7 @@ class ScreenCapture(
             f.setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline)
             f.setInteger(MediaFormat.KEY_PRIORITY, 0)
             f.setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0)
+            f.setInteger(MediaFormat.KEY_OPERATING_RATE, fps)
             f.setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, 100_000L)
             if (Build.VERSION.SDK_INT >= 30) f.setInteger(MediaFormat.KEY_LATENCY, 1)
         }
@@ -191,6 +193,37 @@ class ScreenCapture(
     fun setScale(s: Float) {
         scale = s
         hd.post { applySize() }
+    }
+
+    /** Espera: libera o encoder mas mantém o VirtualDisplay/MediaProjection (não pede permissão de novo). */
+    fun pause() {
+        val latch = CountDownLatch(1)
+        hd.post {
+            try {
+                val old = encoder; val oldS = inSurface
+                encoder = null; inSurface = null
+                try { vd?.setSurface(null) } catch (_: Exception) {}
+                try { drain?.join(300) } catch (_: Exception) {}
+                try { old?.stop() } catch (_: Exception) {}
+                try { old?.release() } catch (_: Exception) {}
+                try { oldS?.release() } catch (_: Exception) {}
+                paused = true
+            } finally { latch.countDown() }
+        }
+        latch.await(2, java.util.concurrent.TimeUnit.SECONDS)
+    }
+
+    fun resume() {
+        hd.post {
+            if (stopped || !paused) return@post
+            paused = false
+            val (w, h) = size()
+            val (c, s) = makeEncoder(w, h)
+            encoder = c; inSurface = s; outW = w; outH = h; configSent = false
+            vd?.resize(w, h, dpi)
+            vd?.setSurface(s)
+            startDrain(c, w, h)
+        }
     }
 
     fun stop() {

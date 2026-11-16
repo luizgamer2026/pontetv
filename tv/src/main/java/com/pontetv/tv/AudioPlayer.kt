@@ -46,7 +46,7 @@ class AudioPlayer {
     private fun loop(t: AudioTrack) {
         while (running) {
             val c = q.poll(100, TimeUnit.MILLISECONDS) ?: continue
-            val maxQ = 8 + AvSync.audioDelayMs / 20
+            val maxQ = 24 + AvSync.audioDelayMs / 5 // pacotes de 5 ms
             while (q.size > maxQ) q.poll() // mantém o áudio "ao vivo"
             try {
                 val head = t.playbackHeadPosition.toLong() and 0xFFFFFFFFL

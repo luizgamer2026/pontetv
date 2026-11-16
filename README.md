@@ -12,7 +12,7 @@ TV de referência (CPU-Z): TCL "Smart TV (C06_2K_GB)", MediaTek MT5867, 4×Corte
 |---|---|
 | Captura | `MediaProjection` → `VirtualDisplay` → `MediaCodec` (H.264 Baseline, CBR, sem B-frames). Android 14: serviço `mediaProjection` + callback registrado antes do VirtualDisplay. |
 | Decodificação | `MediaCodec` H.264 → `SurfaceView`; flag de baixa latência (Android 11 na TV). |
-| Transporte | TCP próprio, `TCP_NODELAY`, buffer de envio pequeno, fila curta: se a rede atrasa, descarta quadros P e pede novo quadro-chave. (UDP/RTP com FEC seria melhor em Wi-Fi ruim; não implementado.) |
+| Transporte | **Vídeo e áudio por UDP** (pacotes de 1200 B + paridade XOR que recupera 1 pacote perdido por quadro; quadro incompleto é descartado e a TV pede novo quadro-chave, sem esperar retransmissão). Controle/entrada/pareamento por TCP. Se a TV não receber UDP em 3 s, o celular volta sozinho para TCP. Não é WebRTC (libwebrtc pesaria demais numa TV com ~900 MB de RAM), mas evita o travamento por pacote perdido do TCP. |
 | Rede | Rede local (Wi-Fi/cabo), hotspot do celular, ou **Wi-Fi Direct** (TV cria o grupo; o celular entra pelo QR). |
 | Descoberta/pareamento | mDNS + QR + PIN + IP manual. Após parear, a TV devolve uma chave persistente (reconecta sem código). |
 | Resolução | A TV informa o tamanho do painel (1280×720); o celular **nunca transmite acima disso**, mesmo que você escolha 1080p (poupa decoder e RAM da TV). |
@@ -45,3 +45,16 @@ Na TV: botão **Wi-Fi Direct** (pede localização, exigência do Android) → o
 
 Push no GitHub → Actions → artefatos `PonteTV-Celular-APK` e `PonteTV-AndroidTV-APK`.
 1. Receptor na TV (QR + código; ✔ teclado/mouse). 2. Celular → TV → parear → permitir captura. 3. Ativar acessibilidade (Android 13+/14: Informações do app → ⋮ → *Permitir configurações restritas*). 4. Conferir RTT, "Captura → TV" e A/V; F9 na TV; F8 modo jogo.
+
+
+## Permissão de captura (aviso "transmitir")
+
+O Android exige o aviso para capturar a tela; **sem Shizuku/ADB/root não há como removê-lo**. O app pede **uma vez**: se a TV encerra ou a conexão cai, o serviço fica **em espera** mantendo a permissão, e reconectar pela tela do app **não pede o aviso de novo**. "Encerrar tudo" (app ou notificação) libera a permissão.
+
+## Modo jogo automático
+
+O celular detecta o app em primeiro plano (categoria "Jogo" do Android ou lista extra em Configurações) e avisa a TV. Com o mouse da TV detectado, a TV **esconde o cursor e liga o modo jogo sozinha**; ao sair do jogo, volta ao normal. F8 sobrepõe manualmente.
+
+## Barra de tarefas e lançador (estilo desktop, com limites)
+
+Na TV: mouse na borda de baixo (ou **F10**) mostra Início/Voltar/Recentes/Apps/Avisos/Encerrar; **Apps** lista os apps do celular (com ícone) e abre o escolhido (exige "Exibir sobre outros apps" no celular). **Não é um DeX de verdade**: a TV mostra a tela do celular, um app por vez. Janelas independentes numa segunda tela exigem permissões de sistema (Shizuku/root/ADB) que este projeto não usa.

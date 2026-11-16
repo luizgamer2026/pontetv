@@ -30,6 +30,18 @@ object Proto {
     const val T_DEVICES = 50 // TV -> celular: teclado/mouse detectados
     const val T_CLOCK = 51   // celular -> TV: diferença de relógio (celular = TV + delta)
     const val T_STATS = 52   // TV -> celular: latência medida, fps, descartes
+    const val T_UDP_OK = 53  // TV -> celular: recebeu pacotes UDP (senão o celular volta para TCP)
+    const val T_GAME = 54    // celular -> TV: app em primeiro plano é um jogo (1/0)
+    const val T_CMD = 55     // TV -> celular: comando JSON (home/back/recents/notifications/launch)
+    const val T_APPS = 56    // celular -> TV: lista JSON de apps (pkg, label, ícone base64)
+    const val T_APPS_REQ = 57 // TV -> celular: pede a lista de apps
+
+    // UDP (vídeo/áudio): [tipo][...]; vídeo = id(4) idx(2) count(2) flags(1) pts(8) + dados
+    const val U_VIDEO = 1
+    const val U_AUDIO = 2
+    const val U_FEC = 3
+    const val UDP_PAYLOAD = 1200
+    const val UDP_PORT = 48751
 
     const val I_KEY = 1
     const val I_MOUSE_REL = 2

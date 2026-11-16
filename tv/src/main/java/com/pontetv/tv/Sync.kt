@@ -26,7 +26,7 @@ object AvSync {
         val a = ReceiverCore.audio.rawLatencyMs()
         if (!ClockSync.has || v < 0 || a < 0) { reset(); return }
         val diff = (a - v).toInt()
-        val nv = if (diff > 0) minOf(diff, 60) else 0
+        val nv = 0 // atraso de vídeo desligado: agendar quadros causa trepidação; só o áudio é atrasado
         val na = if (diff < 0) minOf(-diff, 150) else 0
         if (abs(nv - videoDelayMs) > 8 || (nv == 0) != (videoDelayMs == 0)) videoDelayMs = nv
         if (abs(na - audioDelayMs) > 8 || (na == 0) != (audioDelayMs == 0)) audioDelayMs = na

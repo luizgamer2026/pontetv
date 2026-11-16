@@ -3,18 +3,22 @@ package com.pontetv.phone
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
 import android.graphics.Path
+import android.content.Intent
+import android.content.pm.ApplicationInfo
 import android.hardware.display.DisplayManager
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.provider.Settings
 import android.util.DisplayMetrics
 import android.view.Display
 import android.view.KeyEvent
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import com.pontetv.common.Proto
+import org.json.JSONObject
 import java.nio.ByteBuffer
 import kotlin.math.abs
 import kotlin.math.sqrt
@@ -65,7 +69,51 @@ class InputAccessibilityService : AccessibilityService() {
         map = KeyMap.load(prefs)
     }
 
-    override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
+    private var autoGame = false
+    private val gameCache = HashMap<String, Boolean>()
+
+    /** Detecta o app em primeiro plano; se for jogo, avisa a TV (ela esconde o mouse e entra no modo jogo). */
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        if (event == null || event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
+        val pkg = event.packageName?.toString() ?: return
+        val ime = Settings.Secure.getString(contentResolver, Settings.Secure.DEFAULT_INPUT_METHOD)?.substringBefore('/')
+        if (pkg == packageName || pkg == "com.android.systemui" || pkg == ime) return
+        val g = isGame(pkg)
+        if (g != autoGame) { autoGame = g; sendGame() }
+    }
+
+    private fun isGame(pkg: String): Boolean = gameCache.getOrPut(pkg) {
+        try {
+            val ai = packageManager.getApplicationInfo(pkg, 0)
+            ai.category == ApplicationInfo.CATEGORY_GAME || (ai.flags and 0x02000000) != 0 || prefs.extraGames().contains(pkg)
+        } catch (e: Exception) { false }
+    }
+
+    private fun sendGame() {
+        StreamService.current?.sendControl(Proto.T_GAME, byteArrayOf(if (autoGame) 1 else 0))
+    }
+
+    fun resendGame() { main.post { gameCache.clear(); sendGame() } }
+
+    /** Comandos da barra de tarefas/lançador da TV. */
+    fun postCommand(json: String) {
+        main.post {
+            try {
+                val o = JSONObject(json)
+                when (o.optString("cmd")) {
+                    "home" -> performGlobalAction(GLOBAL_ACTION_HOME)
+                    "back" -> performGlobalAction(GLOBAL_ACTION_BACK)
+                    "recents" -> performGlobalAction(GLOBAL_ACTION_RECENTS)
+                    "notifications" -> performGlobalAction(GLOBAL_ACTION_NOTIFICATIONS)
+                    "launch" -> {
+                        val i = packageManager.getLaunchIntentForPackage(o.optString("pkg"))
+                        if (i != null) { i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED); startActivity(i) }
+                    }
+                    else -> {}
+                }
+            } catch (_: Exception) {}
+        }
+    }
     override fun onInterrupt() {}
 
     override fun onUnbind(intent: android.content.Intent?): Boolean {
