@@ -44,13 +44,16 @@ object HidLink {
     private val cbExec = Executors.newSingleThreadExecutor()
 
     // ---- envio de baixa latência ----
-    // Intervalo mínimo entre dois relatórios de MOVIMENTO (~125 Hz, como um mouse Bluetooth comum). Se o Bluetooth
-    // não der conta, o movimento que chega nesse intervalo é SOMADO ao relatório que ainda não saiu (nada se perde,
-    // nada fica na fila acumulando atraso).
-    private const val MOVE_GAP_NS = 8_000_000L
-    // Com o controle ativo e nada para enviar, manda um relatório vazio de mouse a cada 80 ms só para o link
+    // Intervalo mínimo entre dois relatórios de MOVIMENTO. F9 alterna entre 8 ms (125 Hz), 4 ms (250 Hz),
+    // 11 ms (90 Hz) e 16 ms (62 Hz). Se o Bluetooth não der conta, o movimento que chega no intervalo é SOMADO ao
+    // relatório que ainda não saiu (nada se perde, nada fica na fila acumulando atraso).
+    private val GAPS_MS = longArrayOf(8, 4, 11, 16)
+    @Volatile private var gapIdx = 0
+    // Com o controle ativo e nada para enviar, manda um relatório vazio de mouse a cada 40 ms só para o link
     // Bluetooth não voltar ao modo de economia (sniff), que atrasa o primeiro movimento/tecla depois de uma pausa.
-    private const val KEEPALIVE_NS = 80_000_000L
+    // F10 liga/desliga.
+    private const val KEEPALIVE_MS = 40L
+    @Volatile private var keepAliveOn = true
     private const val MAX_QUEUE = 512
 
     private class Report(val id: Int, val data: ByteArray)
@@ -62,6 +65,21 @@ object HidLink {
     @Volatile private var lastButtons = 0   // estado de botões que o mouse deve manter (usado no keepalive)
     private var nextMoveAt = 0L             // só a thread de envio mexe
 
+    val moveHz: Int get() = (1000L / GAPS_MS[gapIdx]).toInt()
+    val keepAlive: Boolean get() = keepAliveOn
+
+    /** F9: troca o ritmo do mouse (125 -> 250 -> 90 -> 62 Hz). */
+    fun cycleRate() { gapIdx = (gapIdx + 1) % GAPS_MS.size; prefs?.rateIdx = gapIdx; wake() }
+
+    /** F10: liga/desliga o keepalive. */
+    fun toggleKeepAlive() { keepAliveOn = !keepAliveOn; prefs?.keepAlive = keepAliveOn; wake() }
+
+    /** Acorda a thread de envio (ao começar a controlar ou mudar uma opção). */
+    fun wake() {
+        qLock.lock()
+        try { qCond.signal() } finally { qLock.unlock() }
+    }
+
     /** Diagnóstico (mostrado no HUD): relatórios enviados por segundo e o envio mais demorado da última janela. */
     @Volatile var statRate = 0
     @Volatile var statWorstMs = 0
@@ -69,7 +87,10 @@ object HidLink {
     fun init(ctx: Context) {
         if (app != null) return
         app = ctx.applicationContext
-        prefs = TvPrefs(ctx)
+        val p = TvPrefs(ctx)
+        prefs = p
+        gapIdx = p.rateIdx.coerceIn(0, GAPS_MS.size - 1)
+        keepAliveOn = p.keepAlive
         adapter = (ctx.applicationContext.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager)?.adapter
         startWorker()
     }
@@ -237,6 +258,7 @@ object HidLink {
         if (h == null || !registered) { status = "Bluetooth ainda não está pronto."; notifyState(); return }
         status = "Conectando a ${nameOf(d)}…"
         notifyState()
+        try { adapter?.cancelDiscovery() } catch (_: Exception) {}
         try { h.connect(d) } catch (e: Exception) { status = "Falha ao conectar: ${e.message}"; notifyState() }
     }
 
@@ -298,8 +320,8 @@ object HidLink {
             while (workerRun) {
                 val head = queue.peekFirst()
                 if (head == null) {
-                    if (InputBridge.capturing && host != null) {
-                        if (qCond.awaitNanos(KEEPALIVE_NS) <= 0L && queue.isEmpty()) {
+                    if (keepAliveOn && InputBridge.capturing && host != null) {
+                        if (qCond.awaitNanos(KEEPALIVE_MS * 1_000_000L) <= 0L && queue.isEmpty()) {
                             return Report(HidDescriptor.ID_MOUSE, byteArrayOf(lastButtons.toByte(), 0, 0, 0, 0))
                         }
                     } else qCond.await()
@@ -327,7 +349,7 @@ object HidLink {
             val d = host
             if (h == null || d == null) { clearQueue(); continue }
             val t0 = System.nanoTime()
-            if (isMove(r)) nextMoveAt = t0 + MOVE_GAP_NS
+            if (isMove(r)) nextMoveAt = t0 + GAPS_MS[gapIdx] * 1_000_000L
             try { h.sendReport(d, r.id, r.data) } catch (_: Exception) {}
             val dt = System.nanoTime() - t0
             count++

@@ -32,7 +32,9 @@ class KeyFilterService : AccessibilityService() {
     override fun onKeyEvent(event: KeyEvent): Boolean {
         if (!InputBridge.capturing || !HidLink.connected) return false
         if (!InputBridge.isKeyboard(event)) return false
-        if (event.keyCode == KeyEvent.KEYCODE_F8) return false // F8 (soltar/controlar) é tratado pelo app
+        // F8 (soltar/controlar), F9 (ritmo do mouse) e F10 (keepalive) são tratados pelo app
+        if (event.keyCode == KeyEvent.KEYCODE_F8 || event.keyCode == KeyEvent.KEYCODE_F9 ||
+            event.keyCode == KeyEvent.KEYCODE_F10) return false
         InputBridge.key(event)
         return true
     }

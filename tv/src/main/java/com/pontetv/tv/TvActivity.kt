@@ -3,6 +3,7 @@ package com.pontetv.tv
 import android.Manifest
 import android.app.Activity
 import android.bluetooth.BluetoothAdapter
+import android.content.ComponentName
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Typeface
@@ -193,9 +194,42 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
         catch (e: Exception) { Toast.makeText(this, "Abra o Bluetooth nas configurações da TV.", Toast.LENGTH_LONG).show() }
     }
 
+    private val a11yId: String by lazy { ComponentName(this, KeyFilterService::class.java).flattenToString() }
+
+    /** Liga o serviço direto, se o app tiver recebido WRITE_SECURE_SETTINGS por ADB (não depende da tela de Acessibilidade). */
+    private fun tryEnableService(): Boolean {
+        if (checkSelfPermission("android.permission.WRITE_SECURE_SETTINGS") != PackageManager.PERMISSION_GRANTED) return false
+        return try {
+            val cur = Settings.Secure.getString(contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES) ?: ""
+            if (!cur.split(':').contains(a11yId)) {
+                Settings.Secure.putString(
+                    contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES,
+                    if (cur.isEmpty()) a11yId else "$cur:$a11yId"
+                )
+            }
+            Settings.Secure.putInt(contentResolver, Settings.Secure.ACCESSIBILITY_ENABLED, 1)
+            true
+        } catch (e: Exception) { false }
+    }
+
     private fun openAccessibility() {
-        try { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
-        catch (e: Exception) { Toast.makeText(this, "Abra Acessibilidade nas configurações da TV e ligue o PonteTV Hub.", Toast.LENGTH_LONG).show() }
+        if (tryEnableService()) {
+            Toast.makeText(this, "Bloqueio de teclas ligado.", Toast.LENGTH_SHORT).show()
+            main.postDelayed({ update() }, 1000)
+            return
+        }
+        // algumas TVs não têm a tela padrão de Acessibilidade: tenta as telas que existem em cada fabricante
+        val tries = listOf(
+            Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS),
+            Intent().setClassName("com.android.tv.settings", "com.android.tv.settings.accessibility.AccessibilityActivity"),
+            Intent().setClassName("com.android.settings", "com.android.settings.accessibility.AccessibilitySettings"),
+            Intent().setClassName("com.android.settings", "com.android.settings.Settings\$AccessibilitySettingsActivity"),
+            Intent(Settings.ACTION_SETTINGS)
+        )
+        for (i in tries) {
+            try { startActivity(i); return } catch (_: Exception) {}
+        }
+        Toast.makeText(this, "Esta TV não abre a Acessibilidade. Ligue por ADB (comando na tela do app).", Toast.LENGTH_LONG).show()
     }
 
     private fun enableBt() {
@@ -219,6 +253,7 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
         root.pointerIcon = PointerIcon.getSystemIcon(this, PointerIcon.TYPE_NULL)
         root.requestFocus()
         capturePointer()
+        HidLink.wake()
         updateHud()
         main.removeCallbacks(hudTick)
         main.postDelayed(hudTick, 1000)
@@ -264,6 +299,7 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
         hudSub.text = "${h?.let { HidLink.nameOf(it) } ?: ""}\n\n" +
             "Teclado da TV: ${InputWatcher.kb ?: "não detectado"}\nMouse da TV: ${InputWatcher.mouse ?: "não detectado"}" +
             "\nBluetooth: ${HidLink.statRate} envios/s · envio mais lento ${HidLink.statWorstMs} ms" +
+            "\nMouse: até ${HidLink.moveHz} Hz (F9 troca) · Keepalive: ${if (HidLink.keepAlive) "ligado" else "desligado"} (F10 liga/desliga)" +
             (if (soft) "\n(modo alternativo de mouse: esta TV não liberou a captura)" else "") +
             "\n\nF8 solta o teclado e o mouse para usar na TV (ou VOLTAR do controle remoto)"
     }
@@ -290,7 +326,8 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
             "Mouse da TV: ${InputWatcher.mouse?.let { "detectado ($it)" } ?: "não detectado"}"
         a11yText.text = if (KeyFilterService.instance != null)
             "Bloqueio de teclas na TV: ligado (Esc, F1…F12 e Windows vão só para o celular)"
-        else "Bloqueio de teclas na TV: desligado. Ligue em \"Bloquear teclas na TV\" para Esc, F1…F12 e Windows não afetarem a TV."
+        else "Bloqueio de teclas na TV: desligado. Ligue em \"Bloquear teclas na TV\" para Esc, F1…F12 e Windows não afetarem a TV.\n" +
+            "Se a TV não abrir a Acessibilidade, rode no ADB: adb shell pm grant com.pontetv.tv android.permission.WRITE_SECURE_SETTINGS (e toque no botão de novo)"
         btnEnable.visibility = if (HidLink.hasAdapter() && !HidLink.btEnabled()) View.VISIBLE else View.GONE
         btnControl.visibility = if (HidLink.connected && !engaged) View.VISIBLE else View.GONE
 
@@ -312,6 +349,7 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
         super.onResume()
         HidLink.listener = this
         InputWatcher.listener = this
+        if (KeyFilterService.instance == null && tryEnableService()) main.postDelayed({ update() }, 1000)
         update()
     }
 
@@ -351,6 +389,13 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
             return true
         }
         if (engaged) {
+            if (kb && (e.keyCode == KeyEvent.KEYCODE_F9 || e.keyCode == KeyEvent.KEYCODE_F10)) {
+                if (e.action == KeyEvent.ACTION_DOWN && e.repeatCount == 0) {
+                    if (e.keyCode == KeyEvent.KEYCODE_F9) HidLink.cycleRate() else HidLink.toggleKeepAlive()
+                    updateHud()
+                }
+                return true // não vai para o celular
+            }
             if (kb) { InputBridge.key(e); return true }
             if (e.keyCode == KeyEvent.KEYCODE_BACK) {
                 // o botão direito do mouse também vira VOLTAR no Android: só o controle remoto solta
