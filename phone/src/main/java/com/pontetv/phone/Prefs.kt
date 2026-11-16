@@ -34,6 +34,9 @@ class Prefs(ctx: Context) {
     var sens: Float
         get() = sp.getFloat("sens", 2f)
         set(v) { sp.edit().putFloat("sens", v).apply() }
+    var ptrSpeed: Float
+        get() = sp.getFloat("ptrSpeed", 1.5f)
+        set(v) { sp.edit().putFloat("ptrSpeed", v).apply() }
     var extraGamesRaw: String
         get() = sp.getString("extraGames", "") ?: ""
         set(v) { sp.edit().putString("extraGames", v).apply() }

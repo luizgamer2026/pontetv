@@ -22,7 +22,7 @@ class LinkStats(val kbps: Int, val fps: Int, val drops: Int, val maxQ: Int, val 
 class Link(
     private val host: String, private val port: Int,
     private val phoneId: String, private val phoneName: String, private val key: String,
-    private val cb: Callback
+    private val cb: Callback, private val role: String = "stream"
 ) {
     interface Callback {
         fun onConnected(tvName: String, tvMaxLong: Int)
@@ -144,7 +144,7 @@ class Link(
                 s.soTimeout = 6000
                 val ww = Wire(s)
                 w = ww
-                ww.send(Proto.T_HELLO, JSONObject().put("mode", "stream").put("id", phoneId)
+                ww.send(Proto.T_HELLO, JSONObject().put("mode", "stream").put("role", role).put("id", phoneId)
                     .put("name", phoneName).put("secret", key).toString().toByteArray())
                 val r = ww.read()
                 val j = JSONObject(String(r.data))

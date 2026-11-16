@@ -5,7 +5,7 @@ import android.os.Looper
 import java.util.concurrent.CopyOnWriteArrayList
 
 object Session {
-    enum class State { IDLE, CONNECTING, STREAMING, RECONNECTING, STANDBY, ERROR }
+    enum class State { IDLE, CONNECTING, STREAMING, CONTROL, RECONNECTING, STANDBY, ERROR }
 
     @Volatile var state = State.IDLE
     @Volatile var message = ""

@@ -44,6 +44,21 @@ class SettingsActivity : ComponentActivity() {
         }
         c.addView(sb, UI.lp(this, top = 8))
         col.addView(c, UI.lp(this, top = 14))
+        val pc = UI.card(this)
+        val plbl = UI.text(this, "Velocidade do cursor (modo mouse): ${"%.1f".format(prefs.ptrSpeed)}", 14f, UI.TEXT, true)
+        pc.addView(plbl)
+        pc.addView(SeekBar(this).apply {
+            max = 45; progress = ((prefs.ptrSpeed - 0.5f) * 10).toInt()
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(s: SeekBar?, p: Int, u: Boolean) {
+                    prefs.ptrSpeed = 0.5f + p / 10f
+                    plbl.text = "Velocidade do cursor (modo mouse): ${"%.1f".format(prefs.ptrSpeed)}"
+                }
+                override fun onStartTrackingTouch(s: SeekBar?) {}
+                override fun onStopTrackingTouch(s: SeekBar?) {}
+            })
+        }, UI.lp(this, top = 8))
+        col.addView(pc, UI.lp(this, top = 14))
         val g = UI.card(this)
         g.addView(UI.text(this, "Apps tratados como jogo (extra)", 14f, UI.TEXT, true))
         g.addView(UI.text(this, "Jogos com categoria \"Jogo\" já são detectados. Para outros, digite os pacotes separados por vírgula (ex.: com.mojang.minecraftpe).", 12f, UI.MUTED))

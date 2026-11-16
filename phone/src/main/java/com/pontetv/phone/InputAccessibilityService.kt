@@ -2,9 +2,13 @@ package com.pontetv.phone
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
-import android.graphics.Path
+import android.content.Context
 import android.content.Intent
 import android.content.pm.ApplicationInfo
+import android.graphics.Canvas
+import android.graphics.Paint
+import android.graphics.Path
+import android.graphics.PixelFormat
 import android.hardware.display.DisplayManager
 import android.os.Build
 import android.os.Bundle
@@ -14,7 +18,10 @@ import android.os.SystemClock
 import android.provider.Settings
 import android.util.DisplayMetrics
 import android.view.Display
+import android.view.Gravity
 import android.view.KeyEvent
+import android.view.View
+import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import com.pontetv.common.Proto
@@ -25,10 +32,12 @@ import kotlin.math.sqrt
 
 /**
  * Converte teclado/mouse vindos da TV em ações no celular.
- * Limite do Android: sem root/Shizuku não existe API para criar um mouse/teclado "de verdade".
- * Aqui: modo normal = mouse como dedo (toque/arrasto/rolagem) + digitação em campos de texto;
- * modo jogo = WASD vira joystick virtual, mouse vira arrasto de câmera, teclas viram toques
- * em posições calibradas.
+ * Sem root/Shizuku não existe API para criar um mouse/teclado "de verdade". Aqui:
+ *  - Modo mouse: um cursor desenhado na tela do celular (overlay de acessibilidade) que segue o mouse
+ *    da TV; clique = toque no ponto do cursor; arrastar, rolagem e toque longo (botão direito).
+ *  - Modo jogo: WASD = joystick virtual, mouse = câmera (um dedo que fica apoiado e se move), teclas e
+ *    botões = toques em posições calibradas. Liga sozinho quando o app em primeiro plano é um jogo.
+ *  - Texto: pelo teclado PonteTV (IME) quando selecionado; senão por acessibilidade (com espelho local).
  */
 class InputAccessibilityService : AccessibilityService() {
     companion object {
@@ -46,6 +55,29 @@ class InputAccessibilityService : AccessibilityService() {
 
     private class Snap(val c: Contact, val ex: Float, val ey: Float, val rel: Boolean)
 
+    private class PointerView(c: Context) : View(c) {
+        private var px = -200f
+        private var py = -200f
+        private var pending = false
+        private val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xFFFFFFFF.toInt() }
+        private val line = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; color = 0xFF000000.toInt(); strokeWidth = 3f }
+        private val path = Path()
+
+        fun setPos(x: Float, y: Float) {
+            px = x; py = y
+            if (!pending) { pending = true; postOnAnimation { pending = false; invalidate() } }
+        }
+
+        override fun onDraw(cv: Canvas) {
+            val s = resources.displayMetrics.density * 14f
+            path.reset()
+            path.moveTo(px, py); path.lineTo(px, py + s * 1.4f); path.lineTo(px + s * 0.4f, py + s * 1.05f)
+            path.lineTo(px + s * 0.8f, py + s * 1.5f); path.lineTo(px + s * 1.0f, py + s * 1.3f)
+            path.lineTo(px + s * 0.62f, py + s * 0.9f); path.lineTo(px + s * 1.0f, py + s * 0.9f); path.close()
+            cv.drawPath(path, fill); cv.drawPath(path, line)
+        }
+    }
+
     private val main = Handler(Looper.getMainLooper())
     private lateinit var prefs: Prefs
     private var map: Map<String, Pair<Float, Float>> = KeyMap.defaults
@@ -59,27 +91,126 @@ class InputAccessibilityService : AccessibilityService() {
     private var lookDy = 0f
     private var lookOffX = 0f
     private var lookOffY = 0f
-    private var lastLookMs = 0L
     private var slot = 0
+
+    private var controlMode = false
+    private var autoGame = false
+    private var manualGame = false
+    private val gameCache = HashMap<String, Boolean>()
+    private var curX = 0f
+    private var curY = 0f
+    private var overlay: PointerView? = null
+
+    private var mirrorText: String? = null
+    private var mirrorKey: String? = null
+    private var mirrorAt = 0L
 
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
         prefs = Prefs(this)
         map = KeyMap.load(prefs)
+        if (ControlService.running && Session.state == Session.State.CONTROL) controlOn(true)
     }
 
-    private var autoGame = false
-    private val gameCache = HashMap<String, Boolean>()
+    override fun onInterrupt() {}
 
-    /** Detecta o app em primeiro plano; se for jogo, avisa a TV (ela esconde o mouse e entra no modo jogo). */
+    override fun onUnbind(intent: Intent?): Boolean {
+        instance = null
+        showOverlay(false)
+        return super.onUnbind(intent)
+    }
+
+    override fun onDestroy() {
+        instance = null
+        super.onDestroy()
+    }
+
+    fun post(data: ByteArray) { main.post { handle(data) } }
+
+    /** Fim de sessão: solta tudo, esconde o cursor, sai do modo controle. */
+    fun reset() {
+        main.post {
+            controlMode = false; manualGame = false
+            showOverlay(false)
+            setGame(false)
+        }
+    }
+
+    fun controlOn(on: Boolean) {
+        main.post {
+            if (!on) { controlMode = false; manualGame = false; showOverlay(false); setGame(false); return@post }
+            controlMode = true; manualGame = false
+            refreshScreen()
+            curX = sw / 2f; curY = sh / 2f
+            map = KeyMap.load(prefs)
+            applyMode()
+        }
+    }
+
+    fun toggleGame() { main.post { if (controlMode) { manualGame = !manualGame; applyMode() } } }
+
+    /** Modo efetivo no controle: jogo em primeiro plano OU forçado manualmente. */
+    private fun applyMode() {
+        if (!controlMode) return
+        val g = autoGame || manualGame
+        setGame(g)
+        showOverlay(!g)
+    }
+
+    @Suppress("DEPRECATION")
+    private fun refreshScreen() {
+        val d = (getSystemService(DISPLAY_SERVICE) as DisplayManager).getDisplay(Display.DEFAULT_DISPLAY)
+        val m = DisplayMetrics()
+        d.getRealMetrics(m)
+        sw = m.widthPixels.toFloat(); sh = m.heightPixels.toFloat()
+    }
+
+    private fun pt(name: String): Pair<Float, Float> {
+        val f = map[name] ?: KeyMap.defaults.getValue(name)
+        return f.first * sw to f.second * sh
+    }
+
+    // ---------------- cursor na tela do celular ----------------
+    private fun showOverlay(show: Boolean) {
+        val wm = getSystemService(WINDOW_SERVICE) as WindowManager
+        if (show && overlay == null) {
+            val v = PointerView(this)
+            val lp = WindowManager.LayoutParams(
+                WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT,
+                WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                PixelFormat.TRANSLUCENT
+            )
+            lp.gravity = Gravity.TOP or Gravity.START
+            if (Build.VERSION.SDK_INT >= 28) lp.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+            try { wm.addView(v, lp); overlay = v; v.setPos(curX, curY) } catch (_: Exception) {}
+        } else if (!show && overlay != null) {
+            try { wm.removeView(overlay) } catch (_: Exception) {}
+            overlay = null
+        }
+    }
+
+    private fun moveCursor(dx: Float, dy: Float) {
+        refreshScreen()
+        curX = (curX + dx * prefs.ptrSpeed).coerceIn(0f, sw - 1f)
+        curY = (curY + dy * prefs.ptrSpeed).coerceIn(0f, sh - 1f)
+        overlay?.setPos(curX, curY)
+        contacts.lastOrNull { it.name == "mouse" && !it.releasing }?.let { it.tx = clampX(curX); it.ty = clampY(curY); kick() }
+    }
+
+    // ---------------- detecção de jogo ----------------
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null || event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
         val pkg = event.packageName?.toString() ?: return
         val ime = Settings.Secure.getString(contentResolver, Settings.Secure.DEFAULT_INPUT_METHOD)?.substringBefore('/')
         if (pkg == packageName || pkg == "com.android.systemui" || pkg == ime) return
         val g = isGame(pkg)
-        if (g != autoGame) { autoGame = g; sendGame() }
+        if (g != autoGame) {
+            autoGame = g
+            if (controlMode) applyMode() else sendGame()
+        }
     }
 
     private fun isGame(pkg: String): Boolean = gameCache.getOrPut(pkg) {
@@ -95,7 +226,7 @@ class InputAccessibilityService : AccessibilityService() {
 
     fun resendGame() { main.post { gameCache.clear(); sendGame() } }
 
-    /** Comandos da barra de tarefas/lançador da TV. */
+    /** Comandos vindos da TV (barra de tarefas, F8 em modo controle). */
     fun postCommand(json: String) {
         main.post {
             try {
@@ -105,6 +236,7 @@ class InputAccessibilityService : AccessibilityService() {
                     "back" -> performGlobalAction(GLOBAL_ACTION_BACK)
                     "recents" -> performGlobalAction(GLOBAL_ACTION_RECENTS)
                     "notifications" -> performGlobalAction(GLOBAL_ACTION_NOTIFICATIONS)
+                    "toggle_game" -> if (controlMode) { manualGame = !manualGame; applyMode() }
                     "launch" -> {
                         val i = packageManager.getLaunchIntentForPackage(o.optString("pkg"))
                         if (i != null) { i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED); startActivity(i) }
@@ -113,34 +245,6 @@ class InputAccessibilityService : AccessibilityService() {
                 }
             } catch (_: Exception) {}
         }
-    }
-    override fun onInterrupt() {}
-
-    override fun onUnbind(intent: android.content.Intent?): Boolean {
-        instance = null
-        return super.onUnbind(intent)
-    }
-
-    override fun onDestroy() {
-        instance = null
-        super.onDestroy()
-    }
-
-    fun post(data: ByteArray) { main.post { handle(data) } }
-
-    fun reset() { main.post { setGame(false) } }
-
-    @Suppress("DEPRECATION")
-    private fun refreshScreen() {
-        val d = (getSystemService(DISPLAY_SERVICE) as DisplayManager).getDisplay(Display.DEFAULT_DISPLAY)
-        val m = DisplayMetrics()
-        d.getRealMetrics(m)
-        sw = m.widthPixels.toFloat(); sh = m.heightPixels.toFloat()
-    }
-
-    private fun pt(name: String): Pair<Float, Float> {
-        val f = map[name] ?: KeyMap.defaults.getValue(name)
-        return f.first * sw to f.second * sh
     }
 
     // ---------------- mensagens da TV ----------------
@@ -157,12 +261,14 @@ class InputAccessibilityService : AccessibilityService() {
                 }
                 Proto.I_MOUSE_REL -> {
                     val dx = b.float; val dy = b.float
-                    if (game) { lookDx += dx; lookDy += dy; kick() }
+                    if (game) { lookDx += dx; lookDy += dy; kick() } else moveCursor(dx, dy)
                 }
                 Proto.I_MOUSE_ABS -> {
                     val x = b.float; val y = b.float
-                    if (!game) contacts.lastOrNull { it.name == "mouse" && !it.releasing }?.let {
-                        it.tx = clampX(x * sw); it.ty = clampY(y * sh); kick()
+                    if (!game) {
+                        curX = clampX(x * sw); curY = clampY(y * sh)
+                        overlay?.setPos(curX, curY)
+                        contacts.lastOrNull { it.name == "mouse" && !it.releasing }?.let { it.tx = curX; it.ty = curY; kick() }
                     }
                 }
                 Proto.I_MOUSE_BTN -> {
@@ -170,7 +276,7 @@ class InputAccessibilityService : AccessibilityService() {
                     mouseBtn(btn, down, b.float, b.float)
                 }
                 Proto.I_SCROLL -> scroll(b.float, b.float, b.float, b.float)
-                Proto.I_MODE -> setGame(b.get().toInt() == 1)
+                Proto.I_MODE -> if (!controlMode) setGame(b.get().toInt() == 1)
             }
         } catch (_: Exception) {}
     }
@@ -185,7 +291,10 @@ class InputAccessibilityService : AccessibilityService() {
     }
 
     private fun releaseAll() {
-        for (c in contacts) c.releasing = true
+        for (c in contacts) {
+            if (c.name == "look" && !c.releasing) { c.tx = clampX(c.tx + 48f); c.ty = clampY(c.ty) } // sair arrastando (não vira toque)
+            c.releasing = true
+        }
         keysDown.clear()
         lookDx = 0f; lookDy = 0f
         kick()
@@ -200,7 +309,9 @@ class InputAccessibilityService : AccessibilityService() {
             }
             return
         }
-        val px = clampX(x * sw); val py = clampY(y * sh)
+        val px = if (x < 0f) curX else clampX(x * sw)
+        val py = if (y < 0f) curY else clampY(y * sh)
+        if (x >= 0f) { curX = px; curY = py; overlay?.setPos(curX, curY) }
         when (btn) {
             Proto.BTN_LEFT -> if (down) {
                 contacts.add(Contact("mouse", px, py)); kick()
@@ -208,7 +319,6 @@ class InputAccessibilityService : AccessibilityService() {
                 contacts.lastOrNull { it.name == "mouse" && !it.releasing }?.let { it.releasing = true; kick() }
             }
             Proto.BTN_RIGHT -> if (down) {
-                // clique direito = toque longo
                 contacts.add(Contact("rclick", px, py).also { it.releaseAt = SystemClock.uptimeMillis() + 650 }); kick()
             }
         }
@@ -220,8 +330,8 @@ class InputAccessibilityService : AccessibilityService() {
             return
         }
         if (h == 0f && v == 0f) return
-        val px = clampX((if (x in 0f..1f) x else 0.5f) * sw)
-        val py = clampY((if (y in 0f..1f) y else 0.5f) * sh)
+        val px = if (x in 0f..1f) clampX(x * sw) else curX
+        val py = if (y in 0f..1f) clampY(y * sh) else curY
         val dist = 140f * resources.displayMetrics.density
         val c = Contact("scroll", px, py)
         c.tx = clampX(px - h * dist); c.ty = clampY(py + v * dist)
@@ -292,32 +402,33 @@ class InputAccessibilityService : AccessibilityService() {
         kick()
     }
 
-    private fun pumpLook(now: Long) {
+    /**
+     * Câmera: UM dedo que fica apoiado na área da câmera e se move com o mouse (como arrastar sem soltar).
+     * Soltar com pouco movimento viraria um toque (era o que abria apps/ações sozinho); por isso o dedo só
+     * é solto ao chegar perto do limite da área (movimento grande) ou ao sair do modo jogo.
+     */
+    private fun pumpLook() {
         if (!game) return
         val dx = lookDx; val dy = lookDy
         lookDx = 0f; lookDy = 0f
-        val look = contacts.lastOrNull { it.name == "look" && !it.releasing }
-        if (dx != 0f || dy != 0f) {
-            lastLookMs = now
-            val (cx, cy) = pt("LOOK")
-            val s = prefs.sens
-            var c = look
-            if (c == null) { c = Contact("look", cx, cy); contacts.add(c); lookOffX = 0f; lookOffY = 0f }
-            lookOffX += dx * s; lookOffY += dy * s
-            val range = 0.15f * sw
-            if (abs(lookOffX) > range || abs(lookOffY) > range) {
-                c.tx = clampX(cx + lookOffX.coerceIn(-range, range)); c.ty = clampY(cy + lookOffY.coerceIn(-range, range))
-                c.releasing = true
-            } else {
-                c.tx = clampX(cx + lookOffX); c.ty = clampY(cy + lookOffY)
-            }
-        } else if (look != null && now - lastLookMs > 120) {
-            look.releasing = true
-        }
+        if (dx == 0f && dy == 0f) return
+        val (cx, cy) = pt("LOOK")
+        var c = contacts.lastOrNull { it.name == "look" && !it.releasing }
+        if (c == null) { c = Contact("look", cx, cy); contacts.add(c); lookOffX = 0f; lookOffY = 0f }
+        lookOffX += dx * prefs.sens; lookOffY += dy * prefs.sens
+        val range = 0.15f * sw
+        c.tx = clampX(cx + lookOffX.coerceIn(-range, range)); c.ty = clampY(cy + lookOffY.coerceIn(-range, range))
+        if (abs(lookOffX) > range || abs(lookOffY) > range) c.releasing = true // recentraliza no próximo movimento
     }
 
-    // ---------------- teclado: modo texto/desktop ----------------
+    // ---------------- teclado: modo mouse/texto ----------------
     private fun textKey(down: Boolean, code: Int, meta: Int, uni: Int) {
+        // 1) Teclado PonteTV (IME): entrega como eventos reais ao campo de texto em foco
+        val ime = PonteIme.instance
+        if (ime != null && code != KeyEvent.KEYCODE_ESCAPE && code != KeyEvent.KEYCODE_META_LEFT && code != KeyEvent.KEYCODE_META_RIGHT &&
+            !(code == KeyEvent.KEYCODE_TAB && meta and KeyEvent.META_ALT_ON != 0)) {
+            if (ime.handleKey(down, code, meta, uni)) return
+        }
         if (!down) return
         val ctrl = meta and KeyEvent.META_CTRL_ON != 0
         val alt = meta and KeyEvent.META_ALT_ON != 0
@@ -345,17 +456,22 @@ class InputAccessibilityService : AccessibilityService() {
                     editText { it + "\n" }
                 }
             }
-            uni != 0 && !ctrl && uni and 0x80000000.toInt() == 0 -> editText { it + uni.toChar() }
+            uni != 0 && !ctrl && uni and 0x80000000.toInt() == 0 -> editText { it + String(Character.toChars(uni)) }
         }
     }
 
     private fun focusedInput(): AccessibilityNodeInfo? =
         rootInActiveWindow?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
 
+    /** Escrita por acessibilidade com espelho local: evita perder/duplicar letras quando se digita rápido. */
     private fun editText(fn: (String) -> String) {
         val n = focusedInput() ?: return
-        val cur = if (n.isShowingHintText) "" else (n.text?.toString() ?: "")
-        val nt = fn(cur)
+        val key = "${n.windowId}:${n.viewIdResourceName}:${n.className}"
+        val now = SystemClock.uptimeMillis()
+        val base = if (mirrorKey == key && now - mirrorAt < 800 && mirrorText != null) mirrorText!!
+        else (if (n.isShowingHintText) "" else (n.text?.toString() ?: ""))
+        val nt = fn(base)
+        mirrorText = nt; mirrorKey = key; mirrorAt = now
         val a = Bundle().apply { putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, nt) }
         n.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, a)
         val s = Bundle().apply {
@@ -374,7 +490,7 @@ class InputAccessibilityService : AccessibilityService() {
     private fun tick() {
         if (busy) return
         val now = SystemClock.uptimeMillis()
-        pumpLook(now)
+        pumpLook()
         for (c in contacts) if (c.releaseAt != 0L && now >= c.releaseAt) c.releasing = true
         if (contacts.isEmpty()) return
 

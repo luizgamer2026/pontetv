@@ -159,6 +159,6 @@ class DevicesActivity : ComponentActivity() {
 
     private fun open(p: Paired) {
         prefs.savePaired(p)
-        startActivity(Intent(this, ConnectedActivity::class.java).putExtra(StreamService.X_ID, p.id))
+        startActivity(Intent(this, ControlActivity::class.java).putExtra(ControlService.X_ID, p.id))
     }
 }

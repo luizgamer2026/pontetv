@@ -134,6 +134,7 @@ class ConnectedActivity : ComponentActivity() {
             Session.State.CONNECTING -> "Conectando…"
             Session.State.STREAMING -> (if (s.game) "Transmitindo · modo jogo" else "Transmitindo") + (if (s.transport.isNotEmpty()) " · ${s.transport}" else "")
             Session.State.RECONNECTING -> "Reconectando… (${s.message})"
+            Session.State.CONTROL -> "Controle ativo"
             Session.State.STANDBY -> "Em espera${if (s.message.isNotEmpty()) " · ${s.message}" else ""}"
             Session.State.ERROR -> "Erro: ${s.message}"
         }

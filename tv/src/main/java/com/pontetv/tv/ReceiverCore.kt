@@ -23,7 +23,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
-enum class RxState { WAITING, STREAMING, LOST }
+enum class RxState { WAITING, STREAMING, CONTROL, LOST }
 
 /** Servidor do receptor: aceita pareamento (PIN/QR) e sessões de transmissão autorizadas. */
 object ReceiverCore {
@@ -51,6 +51,7 @@ object ReceiverCore {
     @Volatile var mouseName: String? = null
     @Volatile var fpsNow = 0
     @Volatile var mbpsNow = 0f
+    @Volatile var control = false
     @Volatile var latMs = -1
     @Volatile var audMs = -1
     lateinit var tvName: String
@@ -178,6 +179,7 @@ object ReceiverCore {
             val id = j.optString("id")
             val name = j.optString("name", "Celular")
             val secret = j.optString("secret")
+            val ctl = j.optString("role") == "control"
             if (mode == "pair") {
                 if (secret.isNotEmpty() && (secret == pin || secret == token)) {
                     val key = hex(16)
@@ -199,27 +201,28 @@ object ReceiverCore {
                 val dm = app.resources.displayMetrics
                 val maxLong = maxOf(dm.widthPixels, dm.heightPixels).coerceAtMost(1920)
                 w.send(Proto.T_HELLO_OK, JSONObject().put("id", prefs.tvId).put("name", tvName)
-                    .put("kind", kind).put("maxLong", maxLong).put("udpPort", udpPort).toString().toByteArray())
-                session(w, name)
+                    .put("kind", kind).put("maxLong", maxLong).put("udpPort", if (ctl) 0 else udpPort).toString().toByteArray())
+                session(w, name, ctl)
             } else w.close()
         } catch (e: Exception) {
             w.close()
         }
     }
 
-    private fun session(w: Wire, name: String) {
+    private fun session(w: Wire, name: String, ctl: Boolean) {
         active?.close()
         active = w
         userStopped = false
+        control = ctl
         phoneName = name
         ClockSync.has = false
         AvSync.reset()
         udp.reset()
         val my = ++seq
         w.socket.soTimeout = 6000
-        post(RxState.STREAMING)
+        post(if (ctl) RxState.CONTROL else RxState.STREAMING)
         sendDevices()
-        Thread({ statsLoop(w) }, "rx-stats").apply { isDaemon = true; start() }
+        if (!ctl) Thread({ statsLoop(w) }, "rx-stats").apply { isDaemon = true; start() }
         var phoneStopped = false
         try {
             while (true) {
