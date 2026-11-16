@@ -1,5 +1,1 @@
-<?xml version="1.0" encoding="utf-8"?>
-<resources>
-    <string name="app_name">PonteTV</string>
-    <string name="a11y_desc">Permite que o teclado e o mouse da TV controlem o celular: toques, rolagem e digitação enviados pela TV.</string>
-</resources>
+<resources><string name="app_name">PonteTV</string></resources>

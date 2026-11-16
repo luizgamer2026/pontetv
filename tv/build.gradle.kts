@@ -8,7 +8,7 @@ android {
     defaultConfig {
         applicationId = "com.pontetv.tv"
         minSdk = 26
-        targetSdk = 34
+        targetSdk = 32
         versionCode = 1
         versionName = "1.0"
     }
@@ -25,7 +25,6 @@ android {
     kotlinOptions { jvmTarget = "17" }
 }
 dependencies {
-    implementation(project(":common"))
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("com.google.zxing:core:3.5.3")
 }
