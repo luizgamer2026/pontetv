@@ -9,8 +9,8 @@ android {
         applicationId = "com.pontetv.tv"
         minSdk = 28 // BluetoothHidDevice (TV como teclado/mouse) exige Android 9+
         targetSdk = 34
-        versionCode = 5
-        versionName = "2.3"
+        versionCode = 6
+        versionName = "2.4"
     }
     buildTypes {
         release {

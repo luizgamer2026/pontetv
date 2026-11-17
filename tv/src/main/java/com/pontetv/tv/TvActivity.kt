@@ -2,6 +2,7 @@ package com.pontetv.tv
 
 import android.Manifest
 import android.app.Activity
+import android.app.AlertDialog
 import android.bluetooth.BluetoothAdapter
 import android.content.ComponentName
 import android.content.Intent
@@ -42,6 +43,7 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
     private lateinit var listBox: LinearLayout
     private lateinit var btnControl: TextView
     private lateinit var btnEnable: TextView
+    private lateinit var btnMode: TextView
     private lateinit var a11yText: TextView
     private var engaged = false
     private var manualOff = false
@@ -148,6 +150,10 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
         btns.addView(btnEnable, LinearLayout.LayoutParams(-2, -2).apply { leftMargin = dp(12) })
         btns.addView(btnControl, LinearLayout.LayoutParams(-2, -2).apply { leftMargin = dp(12) })
         col.addView(btns, LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(18) })
+        val btns2 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        btnMode = tvButton("Modo: Bluetooth clássico") { toggleMode() }
+        btns2.addView(btnMode)
+        col.addView(btns2, LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(12) })
         visible.requestFocus()
 
         col.addView(label("Celulares já pareados (escolha um para conectar)", 14f, 0xFF8FA0C8.toInt(), true),
@@ -218,18 +224,55 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
             main.postDelayed({ update() }, 1000)
             return
         }
-        // algumas TVs não têm a tela padrão de Acessibilidade: tenta as telas que existem em cada fabricante
+        // só abre telas que EXISTEM nesta TV (evita o erro "nenhuma atividade para esta ação")
         val tries = listOf(
-            Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS),
             Intent().setClassName("com.android.tv.settings", "com.android.tv.settings.accessibility.AccessibilityActivity"),
             Intent().setClassName("com.android.settings", "com.android.settings.accessibility.AccessibilitySettings"),
-            Intent().setClassName("com.android.settings", "com.android.settings.Settings\$AccessibilitySettingsActivity"),
-            Intent(Settings.ACTION_SETTINGS)
+            Intent().setClassName("com.android.settings", "com.android.settings.Settings\$AccessibilitySettingsActivity")
         )
         for (i in tries) {
+            if (i.resolveActivity(packageManager) == null) continue
             try { startActivity(i); return } catch (_: Exception) {}
         }
-        Toast.makeText(this, "Esta TV não abre a Acessibilidade. Ligue por ADB (comando na tela do app).", Toast.LENGTH_LONG).show()
+        showAdbHelp()
+    }
+
+    private fun localIp(): String = try {
+        java.net.NetworkInterface.getNetworkInterfaces().toList()
+            .flatMap { it.inetAddresses.toList() }
+            .firstOrNull { !it.isLoopbackAddress && it is java.net.Inet4Address }
+            ?.hostAddress ?: "IP_DA_TV"
+    } catch (e: Exception) { "IP_DA_TV" }
+
+    /** Passo a passo (uma vez só) para TVs sem a tela de Acessibilidade: liga o serviço por ADB, sem abrir tela nenhuma. */
+    private fun showAdbHelp() {
+        val ip = localIp()
+        val msg = "Esta TV não tem a tela de Acessibilidade. Ligue o bloqueio uma única vez por ADB, " +
+            "pelo Termux do celular (celular e TV na mesma rede):\n\n" +
+            "1) Na TV: Configurações > Sobre > toque 7x em \"Compilação\" > Opções do desenvolvedor > ligue a Depuração USB (e a Depuração por rede, se existir).\n" +
+            "2) No Termux: pkg install android-tools\n" +
+            "3) No Termux: bash ativar-bloqueio.sh $ip   (o arquivo vem na pasta tools do projeto)\n" +
+            "    ou, na mão: adb connect $ip:5555 e depois adb shell pm grant com.pontetv.tv android.permission.WRITE_SECURE_SETTINGS\n" +
+            "4) Aceite o aviso de depuração na TV e volte aqui: o bloqueio liga sozinho."
+        try {
+            AlertDialog.Builder(this)
+                .setTitle("Ligar o bloqueio de teclas por ADB")
+                .setMessage(msg)
+                .setPositiveButton("OK", null)
+                .setNeutralButton("Tentar a tela do sistema") { _, _ ->
+                    try { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) } catch (_: Exception) {}
+                }
+                .show()
+        } catch (e: Exception) { Toast.makeText(this, msg, Toast.LENGTH_LONG).show() }
+    }
+
+    /** Troca entre Bluetooth clássico e BLE (precisa soltar o controle e parear de novo no celular). */
+    private fun toggleMode() {
+        if (engaged) release(true)
+        val want = !HidLink.bleMode
+        if (!HidLink.setBle(want)) Toast.makeText(this, HidLink.status, Toast.LENGTH_LONG).show()
+        else if (want) Toast.makeText(this, "Modo BLE: no celular, esqueça a TV antiga e use Procurar TV de novo.", Toast.LENGTH_LONG).show()
+        update()
     }
 
     private fun enableBt() {
@@ -299,7 +342,8 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
         hudSub.text = "${h?.let { HidLink.nameOf(it) } ?: ""}\n\n" +
             "Teclado da TV: ${InputWatcher.kb ?: "não detectado"}\nMouse da TV: ${InputWatcher.mouse ?: "não detectado"}" +
             "\nBluetooth: ${HidLink.statRate} envios/s · envio mais lento ${HidLink.statWorstMs} ms" +
-            "\nMouse: até ${HidLink.moveHz} Hz (F9 troca) · Keepalive: ${if (HidLink.keepAlive) "ligado" else "desligado"} (F10 liga/desliga)" +
+            (if (HidLink.bleMode) "\nModo BLE · intervalo de conexão: ${BleHid.boostInfo}"
+             else "\nMouse: até ${HidLink.moveHz} Hz (F9 troca) · Keepalive: ${if (HidLink.keepAlive) "ligado" else "desligado"} (F10 liga/desliga)") +
             (if (soft) "\n(modo alternativo de mouse: esta TV não liberou a captura)" else "") +
             "\n\nF8 solta o teclado e o mouse para usar na TV (ou VOLTAR do controle remoto)"
     }
@@ -326,8 +370,8 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
             "Mouse da TV: ${InputWatcher.mouse?.let { "detectado ($it)" } ?: "não detectado"}"
         a11yText.text = if (KeyFilterService.instance != null)
             "Bloqueio de teclas na TV: ligado (Esc, F1…F12 e Windows vão só para o celular)"
-        else "Bloqueio de teclas na TV: desligado. Ligue em \"Bloquear teclas na TV\" para Esc, F1…F12 e Windows não afetarem a TV.\n" +
-            "Se a TV não abrir a Acessibilidade, rode no ADB: adb shell pm grant com.pontetv.tv android.permission.WRITE_SECURE_SETTINGS (e toque no botão de novo)"
+        else "Bloqueio de teclas na TV: desligado. Toque em \"Bloquear teclas na TV\"; se a TV não tiver a tela de Acessibilidade, o app mostra o passo a passo por ADB."
+        btnMode.text = if (HidLink.bleMode) "Modo: BLE (toque para voltar ao clássico)" else "Modo: Bluetooth clássico (toque para testar BLE)"
         btnEnable.visibility = if (HidLink.hasAdapter() && !HidLink.btEnabled()) View.VISIBLE else View.GONE
         btnControl.visibility = if (HidLink.connected && !engaged) View.VISIBLE else View.GONE
 

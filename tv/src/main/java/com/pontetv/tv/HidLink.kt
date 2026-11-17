@@ -33,6 +33,8 @@ object HidLink {
     @Volatile var registered = false
     @Volatile var host: BluetoothDevice? = null
     @Volatile var status = ""
+    /** true = teclado/mouse por BLE (HOGP, BleHid); false = Bluetooth clássico (perfil HID Device). */
+    @Volatile var bleMode = false
     val connected: Boolean get() = host != null
 
     private var app: Context? = null
@@ -91,6 +93,7 @@ object HidLink {
         prefs = p
         gapIdx = p.rateIdx.coerceIn(0, GAPS_MS.size - 1)
         keepAliveOn = p.keepAlive
+        bleMode = p.ble
         adapter = (ctx.applicationContext.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager)?.adapter
         startWorker()
     }
@@ -125,11 +128,13 @@ object HidLink {
             else ctx.registerReceiver(bondRx, f)
         } catch (_: Exception) {}
         val ok = try { ad.getProfileProxy(ctx, svc, BluetoothProfile.HID_DEVICE) } catch (e: Exception) { false }
+        if (bleMode && !BleHid.start(ctx)) bleMode = false // sem BLE nesta sessão: volta ao clássico (sem apagar a escolha)
+        if (bleMode) { notifyState(); return }
         if (!ok) { fail("Esta TV não deixa o app usar o Bluetooth como teclado/mouse (perfil HID indisponível)."); return }
         status = "Preparando o Bluetooth da TV…"
         notifyState()
         main.postDelayed({
-            if (hid == null && btEnabled() && supported) {
+            if (hid == null && btEnabled() && supported && !bleMode) {
                 fail("O Bluetooth desta TV não oferece o perfil de teclado/mouse (HID Device).")
             }
         }, 6000)
@@ -140,7 +145,7 @@ object HidLink {
             if (profile != BluetoothProfile.HID_DEVICE) return
             val h = proxy as BluetoothHidDevice
             hid = h
-            registerApp(h)
+            if (!bleMode) registerApp(h)
         }
 
         override fun onServiceDisconnected(profile: Int) {
@@ -178,6 +183,7 @@ object HidLink {
 
     private val callback = object : BluetoothHidDevice.Callback() {
         override fun onAppStatusChanged(pluggedDevice: BluetoothDevice?, registered: Boolean) {
+            if (bleMode) { HidLink.registered = false; return }
             if (!registered && usingQos && !qosRetried) {
                 // o Bluetooth desta TV não aceitou o QoS: registra de novo sem ele
                 qosRetried = true
@@ -235,11 +241,56 @@ object HidLink {
                 i.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice::class.java)
             else i.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
             // celular acabou de parear com a TV: a TV conecta nele
-            if (st == BluetoothDevice.BOND_BONDED && d != null && host == null) {
+            if (st == BluetoothDevice.BOND_BONDED && d != null && host == null && !bleMode) {
                 main.postDelayed({ if (host == null) connect(d) }, 1500)
             }
             notifyState()
         }
+    }
+
+    // ---------------- transporte BLE ----------------
+    fun bleStatus(msg: String) { status = msg; notifyState() }
+
+    /** Chamado pelo BleHid: o celular conectou (ready=false) ou ligou as notificações do HID (ready=true). */
+    fun bleConnection(d: BluetoothDevice?, ready: Boolean) {
+        if (!bleMode) return
+        when {
+            d != null && ready -> { host = d; status = "Conectado (BLE)." }
+            d != null -> status = "BLE: celular conectando…"
+            else -> { host = null; clearQueue(); status = "BLE: aguardando o celular." }
+        }
+        notifyState()
+    }
+
+    /** Troca o transporte. Retorna false (e deixa o motivo em [status]) se esta TV não suporta BLE. */
+    fun setBle(on: Boolean): Boolean {
+        val c = app ?: return false
+        if (on == bleMode) return true
+        host = null
+        clearQueue()
+        if (on) {
+            if (!BleHid.supported(c)) {
+                status = "Esta TV não consegue anunciar BLE (sem modo periférico). Fica no Bluetooth clássico."
+                notifyState(); return false
+            }
+            bleMode = true
+            try { hid?.unregisterApp() } catch (_: Exception) {}
+            registered = false
+            if (!BleHid.start(c)) {
+                bleMode = false
+                hid?.let { qosRetried = false; registerApp(it) }
+                notifyState(); return false
+            }
+            prefs?.ble = true
+        } else {
+            bleMode = false
+            prefs?.ble = false
+            BleHid.stop()
+            status = "Preparando o Bluetooth da TV…"
+            hid?.let { qosRetried = false; registerApp(it) }
+        }
+        notifyState()
+        return true
     }
 
     private fun autoConnect() {
@@ -254,6 +305,7 @@ object HidLink {
     }
 
     fun connect(d: BluetoothDevice) {
+        if (bleMode) { BleHid.connect(d); status = "BLE: chamando ${nameOf(d)}…"; notifyState(); return }
         val h = hid
         if (h == null || !registered) { status = "Bluetooth ainda não está pronto."; notifyState(); return }
         status = "Conectando a ${nameOf(d)}…"
@@ -263,6 +315,7 @@ object HidLink {
     }
 
     fun disconnect() {
+        if (bleMode) { BleHid.disconnect(); return }
         val d = host ?: return
         try { hid?.disconnect(d) } catch (_: Exception) {}
     }
@@ -320,7 +373,7 @@ object HidLink {
             while (workerRun) {
                 val head = queue.peekFirst()
                 if (head == null) {
-                    if (keepAliveOn && InputBridge.capturing && host != null) {
+                    if (keepAliveOn && !bleMode && InputBridge.capturing && host != null) {
                         if (qCond.awaitNanos(KEEPALIVE_MS * 1_000_000L) <= 0L && queue.isEmpty()) {
                             return Report(HidDescriptor.ID_MOUSE, byteArrayOf(lastButtons.toByte(), 0, 0, 0, 0))
                         }
@@ -347,10 +400,13 @@ object HidLink {
             val r = nextReport() ?: break
             val h = hid
             val d = host
-            if (h == null || d == null) { clearQueue(); continue }
+            val ble = bleMode
+            if (d == null || (!ble && h == null)) { clearQueue(); continue }
             val t0 = System.nanoTime()
-            if (isMove(r)) nextMoveAt = t0 + GAPS_MS[gapIdx] * 1_000_000L
-            try { h.sendReport(d, r.id, r.data) } catch (_: Exception) {}
+            // BLE: o ritmo é ditado pela confirmação da notificação (BleHid.send espera); só um piso de 2 ms
+            if (isMove(r)) nextMoveAt = t0 + (if (ble) 2L else GAPS_MS[gapIdx]) * 1_000_000L
+            if (ble) BleHid.send(r.id, r.data)
+            else try { h?.sendReport(d, r.id, r.data) } catch (_: Exception) {}
             val dt = System.nanoTime() - t0
             count++
             if (dt > worst) worst = dt

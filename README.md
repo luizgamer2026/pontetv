@@ -36,7 +36,7 @@ Módulos: `phone` (Android 10+, pareia e mostra "Teclado e mouse conectados") ·
 * A imagem do celular na TV não faz parte do app (use o espelhamento nativo/cabo, se quiser).
 * Velocidade do mouse: configuração de ponteiro do próprio celular.
 
-## Latência (v2.2)
+## Latência (v2.4)
 
 * **Envio em thread própria** (prioridade alta) com fila curta: o evento do mouse/teclado sai na hora, sem timer de 8 ms.
 * **Movimento nunca acumula atraso:** o mouse é enviado a no máximo ~125 Hz; se o Bluetooth não der conta, o movimento
@@ -51,6 +51,16 @@ Módulos: `phone` (Android 10+, pareia e mostra "Teclado e mouse conectados") ·
 **Teste ao vivo (com o controle ativo, no teclado da TV):** **F9** troca o ritmo máximo do mouse
 (125 → 250 → 90 → 62 Hz) e **F10** liga/desliga o keepalive. A escolha fica salva e aparece no HUD. F9/F10 não vão para o celular.
 Dica: em jogo, evite fone Bluetooth tocando no mesmo celular e deixe a TV no Wi-Fi 5 GHz ou cabo; os dois disputam o rádio com o mouse.
+
+## Modo BLE (experimental) e bloqueio de teclas
+
+* **BLE HID (HOGP):** o botão *Modo* do painel da TV troca o Bluetooth clássico por BLE (a TV anuncia o serviço HID e o
+  celular pareia como central). O clássico continua sendo o padrão. Só funciona se o Bluetooth da TV conseguir anunciar BLE;
+  se não conseguir, o app avisa e fica no clássico. Ao trocar, esqueça a TV antiga no celular e use *Procurar TV* de novo.
+  O intervalo de conexão BLE quem decide é o celular; a TV só pede prioridade alta (o HUD mostra o resultado).
+* **Bloqueio de teclas sem a tela de Acessibilidade:** o botão só abre telas que existem na TV; se nenhuma existir, mostra o
+  passo a passo por ADB (com o IP da TV). Em `tools/ativar-bloqueio.sh` há um script para o Termux que liga tudo de uma vez:
+  `bash tools/ativar-bloqueio.sh IP_DA_TV`. Depois de uma vez, o serviço fica ligado (e o app o religa sozinho).
 
 ## Compilar
 

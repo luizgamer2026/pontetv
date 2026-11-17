@@ -19,4 +19,9 @@ class TvPrefs(ctx: Context) {
     var keepAlive: Boolean
         get() = sp.getBoolean("keepAlive", true)
         set(v) { sp.edit().putBoolean("keepAlive", v).apply() }
+
+    /** true = transporte BLE (HOGP); false = Bluetooth clássico. */
+    var ble: Boolean
+        get() = sp.getBoolean("ble", false)
+        set(v) { sp.edit().putBoolean("ble", v).apply() }
 }
