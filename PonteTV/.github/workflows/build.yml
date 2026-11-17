@@ -1,0 +1,29 @@
+name: Build Release APKs
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.7"
+      - run: gradle --no-daemon --stacktrace :phone:assembleRelease :tv:assembleRelease
+      - name: Renomear APKs
+        run: |
+          mkdir out
+          cp phone/build/outputs/apk/release/*.apk out/PonteTV-Celular.apk
+          cp tv/build/outputs/apk/release/*.apk out/PonteTV-AndroidTV.apk
+      - name: Publicar Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "build-${{ github.run_number }}" out/*.apk --title "PonteTV build ${{ github.run_number }}" --notes "APKs release (celular e Android TV)"
