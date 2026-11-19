@@ -49,10 +49,14 @@ class KeyFilterService : AccessibilityService() {
             when {
                 !InputBridge.capturing || !HidLink.connected -> false
                 !InputBridge.isKeyboard(event) -> false
-                // F8 (soltar/controlar), F9 (ritmo do mouse) e F10 (keepalive) são tratados pelo app
-                event.keyCode == KeyEvent.KEYCODE_F8 || event.keyCode == KeyEvent.KEYCODE_F9 ||
-                    event.keyCode == KeyEvent.KEYCODE_F10 -> false
-                else -> { InputBridge.key(event); true }
+                else -> {
+                    val cmd = HubCommands.forKey(event.keyCode)
+                    if (cmd != 0) {
+                        // teclas de comando (F8, F9/Insert, F10/Pause): o próprio serviço trata e consome, a TV nunca as vê
+                        if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) HubCommands.handler?.invoke(cmd)
+                        true
+                    } else { InputBridge.key(event); true }
+                }
             }
         } catch (t: Throwable) { false } // nunca derrubar o serviço: o Android desliga serviço que quebra
     }

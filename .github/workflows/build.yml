@@ -10,6 +10,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -23,7 +25,24 @@ jobs:
           mkdir out
           cp phone/build/outputs/apk/release/*.apk out/PonteTV-Celular.apk
           cp tv/build/outputs/apk/release/*.apk out/PonteTV-AndroidTV.apk
-      - name: Publicar Release
+      - name: Publicar Release (descrição = mensagem do commit)
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "build-${{ github.run_number }}" out/*.apk --title "PonteTV build ${{ github.run_number }}" --notes "APKs release (celular e Android TV)"
+          BEFORE: ${{ github.event.before }}
+          SHA: ${{ github.sha }}
+          RUN: ${{ github.run_number }}
+        run: |
+          # descrição = mensagem de cada commit deste push (se foi só um, só ele)
+          if [ -n "$BEFORE" ] && [ "$BEFORE" != "0000000000000000000000000000000000000000" ] && git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+            COMMITS="$(git rev-list --reverse "$BEFORE..$SHA")"
+          else
+            COMMITS="$SHA"
+          fi
+          : > notes.md
+          for c in $COMMITS; do
+            git log -1 --format=%B "$c" >> notes.md
+            echo >> notes.md
+          done
+          printf '\n---\nArquivos: PonteTV-AndroidTV.apk (TV) e PonteTV-Celular.apk (celular).\n' >> notes.md
+          TITLE="$(git log -1 --format=%s "$SHA")"
+          gh release create "build-$RUN" out/*.apk --title "build $RUN · ${TITLE:0:90}" --notes-file notes.md

@@ -12,6 +12,7 @@ import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.Bundle
+import android.os.SystemClock
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
@@ -49,8 +50,14 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
     private lateinit var a11yText: TextView
     private var engaged = false
     private var manualOff = false
+    private var focusLost = 0
+    private var focusLostAt = 0L
+    private var focusLastMs = 0
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+
+    private fun versionName(): String =
+        try { packageManager.getPackageInfo(packageName, 0).versionName ?: "?" } catch (e: Exception) { "?" }
 
     override fun onCreate(b: Bundle?) {
         super.onCreate(b)
@@ -127,7 +134,7 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(48), dp(28), dp(48), dp(24))
         }
-        col.addView(label("PonteTV Hub", 40f, 0xFFEAF0FF.toInt(), true))
+        col.addView(label("PonteTV Hub  v${versionName()}", 40f, 0xFFEAF0FF.toInt(), true))
         col.addView(label("Teclado e mouse da TV como se estivessem ligados no celular (Bluetooth)", 17f, 0xFF8FA0C8.toInt()))
         col.addView(label("1. Toque em \"Tornar visível\" aqui na TV\n2. No celular, abra o PonteTV e toque nesta TV\n3. Aceite o pareamento nos dois aparelhos", 16f, 0xFFEAF0FF.toInt()),
             LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(16) })
@@ -145,7 +152,7 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
         val settings = tvButton("Bluetooth da TV") { openBtSettings() }
         val keys = tvButton("Bloquear teclas na TV") { openAccessibility() }
         btnEnable = tvButton("Ligar Bluetooth") { enableBt() }
-        btnControl = tvButton("Controlar celular") { manualOff = false; engage() }
+        btnControl = tvButton("Controlar celular") { manualOff = false; resetDiag(); engage() }
         btns.addView(visible)
         btns.addView(settings, LinearLayout.LayoutParams(-2, -2).apply { leftMargin = dp(12) })
         btns.addView(keys, LinearLayout.LayoutParams(-2, -2).apply { leftMargin = dp(12) })
@@ -277,12 +284,25 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
         return false
     }
 
+    private var a11yPress = 0
+
     private fun openAccessibility() {
         if (tryEnableService()) {
             Toast.makeText(this, "Bloqueio de teclas ligado.", Toast.LENGTH_SHORT).show()
             main.postDelayed({ update() }, 1000)
             return
         }
+        a11yPress++
+        // 1º toque: abre as Configurações da TV (sempre funciona) e mostra o caminho até a Acessibilidade
+        if (a11yPress == 1 && openSettingsMain()) {
+            Toast.makeText(
+                this,
+                "Configurações abertas: Preferências do dispositivo > Acessibilidade > PonteTV Hub > ligar. Se preferir, volte e toque de novo aqui para tentar abrir a tela direto.",
+                Toast.LENGTH_LONG
+            ).show()
+            return
+        }
+        // toques seguintes: tenta abrir a tela de Acessibilidade direto, uma por toque
         val list = a11yCandidates()
         if (a11yTry < list.size) {
             for (k in a11yTry until list.size) {
@@ -291,18 +311,16 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
                     a11yTry = k + 1
                     Toast.makeText(
                         this,
-                        "Abrindo Acessibilidade (${k + 1}/${list.size}): ${list[k].component?.shortClassName}. Se não abrir a tela certa, toque de novo para tentar a próxima.",
+                        "Tentando abrir direto (${k + 1}/${list.size}): ${list[k].component?.shortClassName}. Se não abrir, toque de novo.",
                         Toast.LENGTH_LONG
                     ).show()
                     return
                 } catch (_: Exception) {}
             }
         }
-        // nenhuma tela direta funcionou: abre as Configurações da TV e mostra o caminho
         a11yTry = 0
-        if (openSettingsMain()) {
-            Toast.makeText(this, "Abri as Configurações. Vá em Preferências do dispositivo > Acessibilidade > PonteTV Hub e ligue.", Toast.LENGTH_LONG).show()
-        } else showAdbHelp()
+        a11yPress = 0
+        showAdbHelp()
     }
 
     private fun localIp(): String = try {
@@ -422,8 +440,10 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
     /** Só este TextView muda a cada 2 s (pouco trabalho de layout na thread que recebe o mouse). */
     private fun updateStats() {
         val t = "Bluetooth: ${HidLink.statRate} envios/s · envio mais lento ${HidLink.statWorstMs} ms\n" +
+            "Travadas — fila: ${HidLink.statLagMax} ms · envio: ${HidLink.statStallMax} ms · quedas do link: ${HidLink.linkDrops} · " +
+            "foco perdido: ${focusLost}x${if (focusLost > 0) " (última ${focusLastMs} ms)" else ""}\n" +
             (if (HidLink.bleMode) "Modo BLE · intervalo de conexão: ${BleHid.boostInfo}"
-             else "Mouse: até ${HidLink.moveHz} Hz (F9 troca) · Keepalive: ${if (HidLink.keepAlive) "ligado" else "desligado"} (F10 liga/desliga)")
+             else "Mouse: até ${HidLink.moveHz} Hz (← → no controle remoto ou Insert) · Keepalive: ${if (HidLink.keepAlive) "ligado" else "desligado"} (OK no controle ou Pause)")
         if (hudStats.text.toString() != t) hudStats.text = t
     }
 
@@ -449,7 +469,7 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
             "Mouse da TV: ${InputWatcher.mouse?.let { "detectado ($it)" } ?: "não detectado"}"
         a11yText.text = if (KeyFilterService.instance != null)
             "Bloqueio de teclas na TV: ligado (Esc, F1…F12 e Windows vão só para o celular)"
-        else "Bloqueio de teclas na TV: desligado. Toque em \"Bloquear teclas na TV\"; se a TV não tiver a tela de Acessibilidade, o app mostra o passo a passo por ADB."
+        else "Bloqueio de teclas na TV: desligado. Toque em \"Bloquear teclas na TV\" (abre as Configurações). Para ligar sozinho a cada vez que a TV ligar, use o ADB uma vez (toque 3x para ver o passo a passo)."
         btnMode.text = if (HidLink.bleMode) "Modo: BLE (toque para voltar ao clássico)" else "Modo: Bluetooth clássico (toque para testar BLE)"
         btnEnable.visibility = if (HidLink.hasAdapter() && !HidLink.btEnabled()) View.VISIBLE else View.GONE
         btnControl.visibility = if (HidLink.connected && !engaged) View.VISIBLE else View.GONE
@@ -472,6 +492,7 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
         super.onResume()
         HidLink.listener = this
         InputWatcher.listener = this
+        HubCommands.handler = { handleCommand(it) }
         if (KeyFilterService.instance == null && tryEnableService()) main.postDelayed({ update() }, 1000)
         update()
     }
@@ -491,11 +512,33 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
         }
         HidLink.listener = null
         InputWatcher.listener = null
+        HubCommands.handler = null
         super.onPause()
+    }
+
+    private fun resetDiag() { HidLink.resetStats(); focusLost = 0; focusLastMs = 0 }
+
+    /** Se o mouse perdeu a captura (janela da TV por cima, etc.), pega de volta assim que der. */
+    override fun onPointerCaptureChanged(hasCapture: Boolean) {
+        super.onPointerCaptureChanged(hasCapture)
+        if (!hasCapture && engaged && hasWindowFocus()) {
+            main.postDelayed({ if (engaged && hasWindowFocus() && !root.hasPointerCapture()) capturePointer() }, 100)
+        }
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
+        if (!hasFocus && engaged) {
+            // uma janela da TV (menu, aviso, fonte de entrada…) tomou o foco: o teclado e o mouse não chegam mais ao app.
+            // Solta tudo no celular para nenhuma tecla ficar "presa" até o foco voltar.
+            InputBridge.releaseAll()
+            focusLost++
+            focusLostAt = SystemClock.uptimeMillis()
+        }
+        if (hasFocus && focusLostAt != 0L) {
+            focusLastMs = (SystemClock.uptimeMillis() - focusLostAt).toInt()
+            focusLostAt = 0L
+        }
         if (hasFocus) {
             immersive()
             if (engaged && !root.hasPointerCapture()) capturePointer()
@@ -504,28 +547,35 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
     }
 
     // ---------------- teclado ----------------
+    private fun handleCommand(cmd: Int) {
+        when (cmd) {
+            HubCommands.RELEASE_TOGGLE ->
+                if (engaged) release(true) else if (HidLink.connected) { manualOff = false; resetDiag(); engage() }
+            HubCommands.RATE -> { HidLink.cycleRate(); if (engaged) updateHud() }
+            HubCommands.KEEPALIVE -> { HidLink.toggleKeepAlive(); if (engaged) updateHud() }
+        }
+    }
+
     override fun dispatchKeyEvent(e: KeyEvent): Boolean {
         val kb = InputBridge.isKeyboard(e)
-        if (kb && e.keyCode == KeyEvent.KEYCODE_F8 && (engaged || HidLink.connected)) {
-            if (e.action == KeyEvent.ACTION_DOWN && e.repeatCount == 0) {
-                if (engaged) release(true) else { manualOff = false; engage() }
-            }
-            return true
+        val down = e.action == KeyEvent.ACTION_DOWN && e.repeatCount == 0
+        val cmd = if (kb) HubCommands.forKey(e.keyCode) else 0
+        if (cmd != 0) {
+            val usable = if (cmd == HubCommands.RELEASE_TOGGLE) (engaged || HidLink.connected) else engaged
+            if (usable) { if (down) handleCommand(cmd); return true }
         }
         if (engaged) {
-            if (kb && (e.keyCode == KeyEvent.KEYCODE_F9 || e.keyCode == KeyEvent.KEYCODE_F10)) {
-                if (e.action == KeyEvent.ACTION_DOWN && e.repeatCount == 0) {
-                    if (e.keyCode == KeyEvent.KEYCODE_F9) HidLink.cycleRate() else HidLink.toggleKeepAlive()
-                    updateHud()
-                }
-                return true // não vai para o celular
-            }
             if (kb) { InputBridge.key(e); return true }
-            if (e.keyCode == KeyEvent.KEYCODE_BACK) {
-                // o botão direito do mouse também vira VOLTAR no Android: só o controle remoto solta
-                val fromMouse = ((e.device?.sources ?: 0) and InputDevice.SOURCE_MOUSE) == InputDevice.SOURCE_MOUSE
-                if (!fromMouse && e.action == KeyEvent.ACTION_UP) release(true)
-                return true
+            when (e.keyCode) {
+                // controle remoto: ← → trocam o ritmo do mouse, OK liga/desliga o keepalive
+                KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT -> { if (down) handleCommand(HubCommands.RATE); return true }
+                KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> { if (down) handleCommand(HubCommands.KEEPALIVE); return true }
+                KeyEvent.KEYCODE_BACK -> {
+                    // o botão direito do mouse também vira VOLTAR no Android: só o controle remoto solta
+                    val fromMouse = ((e.device?.sources ?: 0) and InputDevice.SOURCE_MOUSE) == InputDevice.SOURCE_MOUSE
+                    if (!fromMouse && e.action == KeyEvent.ACTION_UP) release(true)
+                    return true
+                }
             }
         }
         return super.dispatchKeyEvent(e)

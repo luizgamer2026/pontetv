@@ -58,7 +58,16 @@ object HidLink {
     @Volatile private var keepAliveOn = true
     private const val MAX_QUEUE = 512
 
-    private class Report(val id: Int, val data: ByteArray)
+    private class Report(val id: Int, val data: ByteArray, val t: Long = System.nanoTime())
+
+    // Se a fila "envelhece" (o Bluetooth travou e voltou), NÃO repete o que ficou parado: manda só o estado mais recente.
+    private const val BACKLOG_NS = 150_000_000L
+    // A cada ~250 ms (com o controle ativo) reenvia o estado do teclado: se um relatório de "soltar tecla" se perder,
+    // a tecla não fica presa no celular (o reenvio de um estado igual não gera tecla nova).
+    private const val REFRESH_NS = 250_000_000L
+    @Volatile private var lastKb = ByteArray(HidDescriptor.KEYBOARD_SIZE)
+    private var lastKbSent = 0L   // só a thread de envio mexe
+    private var sentButtons = 0   // idem
 
     private val qLock = ReentrantLock()
     private val qCond: Condition = qLock.newCondition()
@@ -85,6 +94,24 @@ object HidLink {
     /** Diagnóstico (mostrado no HUD): relatórios enviados por segundo e o envio mais demorado da última janela. */
     @Volatile var statRate = 0
     @Volatile var statWorstMs = 0
+    /** Diagnóstico de travadas: maior tempo que um relatório esperou na fila, maior envio demorado, relatórios descartados e quedas do link. */
+    @Volatile var statLagMax = 0
+    @Volatile var statStallMax = 0
+    @Volatile var statCollapsed = 0
+    @Volatile var linkDrops = 0
+    fun resetStats() { statLagMax = 0; statStallMax = 0; statCollapsed = 0 }
+
+    private var userDisc = false
+    private var retry = 0
+    private val retryRun = Runnable { if (host == null && !userDisc && !bleMode) { autoConnect(); scheduleReconnect() } }
+
+    /** Link caiu sem o usuário pedir: a TV tenta reconectar logo (0,3 s, 0,8 s, 1,5 s, 2,5 s, 4 s…), sem esperar o celular. */
+    private fun scheduleReconnect() {
+        if (userDisc || bleMode || retry >= 12) return
+        main.removeCallbacks(retryRun)
+        main.postDelayed(retryRun, longArrayOf(300, 800, 1500, 2500, 4000)[minOf(retry, 4)])
+        retry++
+    }
 
     fun init(ctx: Context) {
         if (app != null) return
@@ -201,10 +228,17 @@ object HidLink {
                     host = device
                     device?.let { prefs?.lastHost = it.address }
                     status = "Conectado."
+                    retry = 0
+                    userDisc = false
+                    main.removeCallbacks(retryRun)
                 }
                 BluetoothProfile.STATE_CONNECTING -> status = "Conectando…"
                 BluetoothProfile.STATE_DISCONNECTED -> {
-                    if (host?.address == device?.address) { host = null; clearQueue() }
+                    if (host?.address == device?.address) {
+                        if (host != null) linkDrops++
+                        host = null; clearQueue()
+                        main.post { scheduleReconnect() }
+                    }
                     status = "Desconectado. Aguardando o celular."
                 }
             }
@@ -257,7 +291,7 @@ object HidLink {
         when {
             d != null && ready -> { host = d; status = "Conectado (BLE)." }
             d != null -> status = "BLE: celular conectando…"
-            else -> { host = null; clearQueue(); status = "BLE: aguardando o celular." }
+            else -> { if (host != null) linkDrops++; host = null; clearQueue(); status = "BLE: aguardando o celular." }
         }
         notifyState()
     }
@@ -305,6 +339,7 @@ object HidLink {
     }
 
     fun connect(d: BluetoothDevice) {
+        userDisc = false
         if (bleMode) { BleHid.connect(d); status = "BLE: chamando ${nameOf(d)}…"; notifyState(); return }
         val h = hid
         if (h == null || !registered) { status = "Bluetooth ainda não está pronto."; notifyState(); return }
@@ -315,6 +350,8 @@ object HidLink {
     }
 
     fun disconnect() {
+        userDisc = true
+        main.removeCallbacks(retryRun)
         if (bleMode) { BleHid.disconnect(); return }
         val d = host ?: return
         try { hid?.disconnect(d) } catch (_: Exception) {}
@@ -326,6 +363,7 @@ object HidLink {
      * Relatórios de mouse seguidos com os mesmos botões são somados em um só enquanto esperam a vez.
      */
     fun send(id: Int, data: ByteArray) {
+        if (id == HidDescriptor.ID_KEYBOARD) lastKb = data
         if (id == HidDescriptor.ID_MOUSE && data.size == HidDescriptor.MOUSE_SIZE) lastButtons = data[0].toInt() and 0x1F
         if (host == null) return
         qLock.lock()
@@ -375,6 +413,34 @@ object HidLink {
         return d[1].toInt() != 0 || d[2].toInt() != 0 || d[3].toInt() != 0 || d[4].toInt() != 0
     }
 
+    /** Chamado com a trava: troca a fila atrasada pelo estado mais recente (última tecla/estado do teclado + soma do movimento do mouse). */
+    private fun collapse() {
+        var kb: Report? = null
+        var btn = -1
+        var sx = 0; var sy = 0; var sv = 0; var sh = 0
+        var n = 0
+        for (r in queue) {
+            n++
+            if (r.id == HidDescriptor.ID_KEYBOARD) kb = r
+            else if (r.id == HidDescriptor.ID_MOUSE && r.data.size == HidDescriptor.MOUSE_SIZE) {
+                btn = r.data[0].toInt()
+                sx += r.data[1]; sy += r.data[2]; sv += r.data[3]; sh += r.data[4]
+            }
+        }
+        queue.clear()
+        if (kb != null) queue.addLast(Report(kb.id, kb.data))
+        if (btn >= 0) {
+            var k = 0
+            do {
+                val cx = sx.coerceIn(-127, 127); val cy = sy.coerceIn(-127, 127)
+                val cv = sv.coerceIn(-127, 127); val ch = sh.coerceIn(-127, 127)
+                queue.addLast(Report(HidDescriptor.ID_MOUSE, byteArrayOf(btn.toByte(), cx.toByte(), cy.toByte(), cv.toByte(), ch.toByte())))
+                sx -= cx; sy -= cy; sv -= cv; sh -= ch
+            } while (++k < 6 && (sx != 0 || sy != 0 || sv != 0 || sh != 0))
+        }
+        statCollapsed += n - queue.size
+    }
+
     private fun clearQueue() {
         qLock.lock()
         try { queue.clear() } finally { qLock.unlock() }
@@ -393,9 +459,12 @@ object HidLink {
             while (workerRun) {
                 val head = queue.peekFirst()
                 if (head == null) {
-                    if (keepAliveOn && !bleMode && InputBridge.capturing && host != null) {
-                        if (qCond.awaitNanos(KEEPALIVE_MS * 1_000_000L) <= 0L && queue.isEmpty()) {
-                            return Report(HidDescriptor.ID_MOUSE, byteArrayOf(lastButtons.toByte(), 0, 0, 0, 0))
+                    if (InputBridge.capturing && host != null) {
+                        val ka = keepAliveOn && !bleMode
+                        val waitNs = if (ka) KEEPALIVE_MS * 1_000_000L else REFRESH_NS
+                        if (qCond.awaitNanos(waitNs) <= 0L && queue.isEmpty()) {
+                            if (System.nanoTime() - lastKbSent >= REFRESH_NS) return Report(HidDescriptor.ID_KEYBOARD, lastKb.copyOf())
+                            if (ka) return Report(HidDescriptor.ID_MOUSE, byteArrayOf(lastButtons.toByte(), 0, 0, 0, 0))
                         }
                     } else qCond.await()
                     continue
@@ -405,10 +474,23 @@ object HidLink {
                     // só espera se não há nada atrás (tecla/botão nunca esperam); enquanto espera, o movimento novo é somado
                     if (gap > 0 && queue.size == 1) { qCond.awaitNanos(gap); continue }
                 }
+                if (queue.size > 1 && System.nanoTime() - head.t > BACKLOG_NS) collapse()
                 return queue.pollFirst()
             }
             return null
         } finally { qLock.unlock() }
+    }
+
+    /** Teclas e mudanças de botão NUNCA podem se perder (um "soltar" perdido deixa a tecla presa): se o Bluetooth recusar, tenta de novo. */
+    private fun sendClassic(h: BluetoothHidDevice?, d: BluetoothDevice, r: Report) {
+        val important = r.id == HidDescriptor.ID_KEYBOARD ||
+            (r.id == HidDescriptor.ID_MOUSE && r.data[0].toInt() != sentButtons)
+        var tries = 0
+        while (true) {
+            val ok = try { h?.sendReport(d, r.id, r.data) == true } catch (_: Exception) { false }
+            if (ok || !important || ++tries >= 5 || host == null) return
+            try { Thread.sleep(3) } catch (_: InterruptedException) { return }
+        }
     }
 
     private fun pump() {
@@ -424,12 +506,17 @@ object HidLink {
             val ble = bleMode
             if (d == null || (!ble && h == null)) { clearQueue(); continue }
             val t0 = System.nanoTime()
+            if (r.id == HidDescriptor.ID_KEYBOARD) lastKbSent = t0
+            val lagMs = ((t0 - r.t) / 1_000_000L).toInt()
+            if (lagMs > statLagMax) statLagMax = lagMs
             // BLE: o ritmo é ditado pela confirmação da notificação (BleHid.send espera); só um piso de 2 ms
             if (isMove(r)) nextMoveAt = t0 + (if (ble) 2L else GAPS_MS[gapIdx]) * 1_000_000L
-            if (ble) BleHid.send(r.id, r.data)
-            else try { h?.sendReport(d, r.id, r.data) } catch (_: Exception) {}
+            if (ble) BleHid.send(r.id, r.data) else sendClassic(h, d, r)
+            if (r.id == HidDescriptor.ID_MOUSE && r.data.size == HidDescriptor.MOUSE_SIZE) sentButtons = r.data[0].toInt()
             val dt = System.nanoTime() - t0
             Adpf.report(hint, dt)
+            val dtMs = (dt / 1_000_000L).toInt()
+            if (dtMs > statStallMax) statStallMax = dtMs
             count++
             if (dt > worst) worst = dt
             if (t0 - winStart >= 1_000_000_000L) {

@@ -36,6 +36,25 @@ Módulos: `phone` (Android 10+, pareia e mostra "Teclado e mouse conectados") ·
 * A imagem do celular na TV não faz parte do app (use o espelhamento nativo/cabo, se quiser).
 * Velocidade do mouse: configuração de ponteiro do próprio celular.
 
+## v2.7: tecla presa, comandos sem F9 e descrição na Release
+
+* **Tecla presa:** o estado do teclado é reenviado a cada ~250 ms com o controle ativo (se um "soltar" se perder, a tecla é solta sozinha),
+  e teclas/botões que o Bluetooth recusar são reenviados até 5 vezes.
+* **Comandos:** F9 em muitas TVs é a tecla "Apps" e abre o launcher. Agora, com o controle ativo: **← →** do controle remoto (ou **Insert**)
+  trocam o ritmo do mouse, **OK** do controle (ou **Pause**) liga/desliga o keepalive, **F8** solta/volta. Com o serviço de bloqueio
+  ligado, F8/F9/F10 também são consumidos pelo próprio serviço (a TV nunca vê).
+* **Release:** a descrição de cada Release no GitHub passa a ser a mensagem do(s) commit(s) do push (o título leva a 1ª linha).
+
+## v2.6: travadas, diagnóstico e versão na tela
+
+* O título do painel da TV mostra a versão instalada (ex.: `PonteTV Hub v2.6`), para conferir se o APK novo foi mesmo instalado.
+* **Sem repetir o que ficou parado:** se o Bluetooth trava e volta, o app manda só o estado mais recente (última tecla/estado do teclado e a soma do
+  movimento do mouse) em vez de repetir segundos de teclas atrasadas.
+* **Reconexão rápida:** se o link cai, a TV tenta reconectar sozinha (0,3 s, 0,8 s, 1,5 s…) sem esperar o celular.
+* **Foco:** se uma janela da TV (menu, aviso, fonte de entrada) tomar o foco, o app solta todas as teclas no celular (nada fica preso) e retoma o mouse ao voltar.
+* **HUD de diagnóstico:** `Travadas — fila: X ms · envio: Y ms · quedas do link: N · foco perdido: Nx (última Z ms)`.
+* **Bloquear teclas:** o 1º toque abre as Configurações da TV; os toques seguintes tentam abrir a Acessibilidade direto e, por fim, mostram o passo a passo por ADB.
+
 ## Latência (v2.5)
 
 * **Envio em thread própria** (prioridade alta) com fila curta: o evento do mouse/teclado sai na hora, sem timer de 8 ms.
