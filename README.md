@@ -62,7 +62,7 @@ Dica: em jogo, evite fone Bluetooth tocando no mesmo celular e deixe a TV no Wi-
   O intervalo de conexão BLE quem decide é o celular; a TV só pede prioridade alta (o HUD mostra o resultado).
 * **Bloqueio de teclas (v2.5):** o filtro de teclas do serviço de Acessibilidade agora só fica ligado *enquanto o teclado controla
   o celular* (antes ficava sempre no caminho de todas as teclas da TV, e por isso a TV podia congelar ao ligar o serviço).
-  O botão varre as telas de Acessibilidade que a TV realmente tem e tenta uma por toque (o aviso mostra qual). Se a TV desligar o
+  O botão varre as telas de Acessibilidade que a TV realmente tem (ignorando os "Stubs", que só mostram o erro "nenhuma ação pode ser executada") e tenta uma por toque (o aviso mostra qual); se nenhuma abrir, abre as Configurações da TV e mostra o caminho. Se a TV desligar o
   serviço ao ser desligada, a permissão dada uma vez por ADB (`pm grant ... WRITE_SECURE_SETTINGS`) faz o app religá-lo sozinho
   ao abrir e a cada boot. Sem a permissão, o passo a passo por ADB aparece na tela (com o IP da TV). Em `tools/ativar-bloqueio.sh` há um script para o Termux que liga tudo de uma vez:
   `bash tools/ativar-bloqueio.sh IP_DA_TV`. Depois de uma vez, o serviço fica ligado (e o app o religa sozinho).

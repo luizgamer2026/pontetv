@@ -209,10 +209,15 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
 
     private var a11yTry = 0
 
-    /** Telas de Acessibilidade que ESTA TV realmente tem: as que atendem a ação padrão, as conhecidas e as achadas varrendo os apps de configurações. */
+    private fun isStub(n: String) = n.contains("Stub", true)
+
+    /** Telas de Acessibilidade que ESTA TV tem de verdade. Os "Stubs" (que só mostram o erro "nenhuma ação pode ser executada") ficam de fora. */
     private fun a11yCandidates(): List<Intent> {
         val out = LinkedHashMap<String, Intent>()
-        fun add(pkg: String, cls: String) { if (!out.containsKey("$pkg/$cls")) out["$pkg/$cls"] = Intent().setClassName(pkg, cls) }
+        fun add(pkg: String, cls: String) {
+            if (isStub(cls)) return
+            if (!out.containsKey("$pkg/$cls")) out["$pkg/$cls"] = Intent().setClassName(pkg, cls)
+        }
         try {
             for (ri in packageManager.queryIntentActivities(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS), 0))
                 add(ri.activityInfo.packageName, ri.activityInfo.name)
@@ -239,6 +244,39 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
         return out.values.filter { it.resolveActivity(packageManager) != null }.sortedBy { score(it) }
     }
 
+    /** Lista (para diagnóstico) o que a TV tem de tela com "Accessib" ou "Stub" nos apps de configurações. */
+    private fun a11yDump(): String {
+        val lines = ArrayList<String>()
+        try {
+            for (ai in packageManager.getInstalledApplications(0)) {
+                if ((ai.flags and ApplicationInfo.FLAG_SYSTEM) == 0 || !ai.packageName.contains("settings", true)) continue
+                val pi = try { packageManager.getPackageInfo(ai.packageName, PackageManager.GET_ACTIVITIES) } catch (_: Exception) { continue }
+                for (a in pi.activities ?: continue) {
+                    if (a.name.contains("accessib", true) || isStub(a.name))
+                        lines.add("${ai.packageName.substringAfterLast('.')}: ${a.name.substringAfterLast('.')}${if (a.exported) "" else " (interna)"}")
+                }
+            }
+        } catch (_: Exception) {}
+        return if (lines.isEmpty()) "nenhuma" else lines.take(12).joinToString("\n")
+    }
+
+    /** Abre o app de Configurações da TV (fallback quando nenhuma tela de Acessibilidade abre direto). */
+    private fun openSettingsMain(): Boolean {
+        val intents = ArrayList<Intent>()
+        for (pkg in listOf("com.android.tv.settings", "com.android.settings"))
+            packageManager.getLaunchIntentForPackage(pkg)?.let { intents.add(it) }
+        try {
+            val q = Intent(Intent.ACTION_MAIN).addCategory("android.intent.category.LEANBACK_SETTINGS")
+            for (ri in packageManager.queryIntentActivities(q, 0))
+                intents.add(Intent().setClassName(ri.activityInfo.packageName, ri.activityInfo.name))
+        } catch (_: Exception) {}
+        for (i in intents) {
+            if (isStub(i.component?.className ?: "")) continue
+            try { startActivity(i); return true } catch (_: Exception) {}
+        }
+        return false
+    }
+
     private fun openAccessibility() {
         if (tryEnableService()) {
             Toast.makeText(this, "Bloqueio de teclas ligado.", Toast.LENGTH_SHORT).show()
@@ -246,20 +284,25 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
             return
         }
         val list = a11yCandidates()
-        for (k in list.indices) {
-            val idx = (a11yTry + k) % list.size
-            try {
-                startActivity(list[idx])
-                a11yTry = idx + 1
-                Toast.makeText(
-                    this,
-                    "Abrindo Acessibilidade (${idx + 1}/${list.size}): ${list[idx].component?.shortClassName}. Se aparecer erro, toque de novo para tentar a próxima tela.",
-                    Toast.LENGTH_LONG
-                ).show()
-                return
-            } catch (_: Exception) {}
+        if (a11yTry < list.size) {
+            for (k in a11yTry until list.size) {
+                try {
+                    startActivity(list[k])
+                    a11yTry = k + 1
+                    Toast.makeText(
+                        this,
+                        "Abrindo Acessibilidade (${k + 1}/${list.size}): ${list[k].component?.shortClassName}. Se não abrir a tela certa, toque de novo para tentar a próxima.",
+                        Toast.LENGTH_LONG
+                    ).show()
+                    return
+                } catch (_: Exception) {}
+            }
         }
-        showAdbHelp()
+        // nenhuma tela direta funcionou: abre as Configurações da TV e mostra o caminho
+        a11yTry = 0
+        if (openSettingsMain()) {
+            Toast.makeText(this, "Abri as Configurações. Vá em Preferências do dispositivo > Acessibilidade > PonteTV Hub e ligue.", Toast.LENGTH_LONG).show()
+        } else showAdbHelp()
     }
 
     private fun localIp(): String = try {
@@ -279,7 +322,8 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
             "2) No Termux: pkg install android-tools\n" +
             "3) No Termux: bash ativar-bloqueio.sh $ip   (o arquivo vem na pasta tools do projeto)\n" +
             "    ou, na mão: adb connect $ip:5555 e depois adb shell pm grant com.pontetv.tv android.permission.WRITE_SECURE_SETTINGS\n" +
-            "4) Aceite o aviso de depuração na TV e volte aqui."
+            "4) Aceite o aviso de depuração na TV e volte aqui.\n\n" +
+            "Telas encontradas nesta TV:\n" + a11yDump()
         try {
             AlertDialog.Builder(this)
                 .setTitle("Ligar o bloqueio de teclas por ADB")
