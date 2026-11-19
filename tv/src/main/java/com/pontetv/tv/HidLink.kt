@@ -331,14 +331,34 @@ object HidLink {
         qLock.lock()
         try {
             val last = queue.peekLast()
-            if (last != null && id == HidDescriptor.ID_MOUSE && last.id == id && merge(last.data, data)) {
-                // somado ao relatório de mouse que ainda não saiu
-            } else {
-                if (queue.size >= MAX_QUEUE) queue.clear() // link morto: não deixa crescer sem limite
-                queue.addLast(Report(id, data))
-            }
+            if (last != null && id == HidDescriptor.ID_MOUSE && last.id == id && merge(last.data, data)) return
+            if (queue.size >= MAX_QUEUE) queue.clear() // link morto: não deixa crescer sem limite
+            queue.addLast(Report(id, data))
             qCond.signal()
         } finally { qLock.unlock() }
+    }
+
+    /** Mouse sem alocar nada quando o movimento é somado a um relatório que ainda não saiu (o caso comum a 1000 Hz). */
+    fun sendMouse(btn: Int, x: Int, y: Int, v: Int, h: Int) {
+        val bt = btn and 0x1F
+        lastButtons = bt
+        if (host == null) return
+        qLock.lock()
+        try {
+            val last = queue.peekLast()
+            if (last != null && last.id == HidDescriptor.ID_MOUSE && mergeInto(last.data, bt, x, y, v, h)) return
+            if (queue.size >= MAX_QUEUE) queue.clear()
+            queue.addLast(Report(HidDescriptor.ID_MOUSE, byteArrayOf(bt.toByte(), x.toByte(), y.toByte(), v.toByte(), h.toByte())))
+            qCond.signal()
+        } finally { qLock.unlock() }
+    }
+
+    private fun mergeInto(a: ByteArray, bt: Int, x: Int, y: Int, v: Int, h: Int): Boolean {
+        if (a.size != HidDescriptor.MOUSE_SIZE || a[0].toInt() != bt) return false
+        val nx = a[1] + x; val ny = a[2] + y; val nv = a[3] + v; val nh = a[4] + h
+        if (nx !in -127..127 || ny !in -127..127 || nv !in -127..127 || nh !in -127..127) return false
+        a[1] = nx.toByte(); a[2] = ny.toByte(); a[3] = nv.toByte(); a[4] = nh.toByte()
+        return true
     }
 
     private fun merge(a: ByteArray, b: ByteArray): Boolean {
@@ -393,6 +413,7 @@ object HidLink {
 
     private fun pump() {
         try { Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_DISPLAY) } catch (_: Exception) {}
+        val hint = Adpf.create(app, Process.myTid())
         var winStart = System.nanoTime()
         var count = 0
         var worst = 0L
@@ -408,6 +429,7 @@ object HidLink {
             if (ble) BleHid.send(r.id, r.data)
             else try { h?.sendReport(d, r.id, r.data) } catch (_: Exception) {}
             val dt = System.nanoTime() - t0
+            Adpf.report(hint, dt)
             count++
             if (dt > worst) worst = dt
             if (t0 - winStart >= 1_000_000_000L) {

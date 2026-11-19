@@ -6,6 +6,7 @@ import android.app.AlertDialog
 import android.bluetooth.BluetoothAdapter
 import android.content.ComponentName
 import android.content.Intent
+import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
@@ -37,6 +38,7 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
     private lateinit var hud: LinearLayout
     private lateinit var hudTitle: TextView
     private lateinit var hudSub: TextView
+    private lateinit var hudStats: TextView
     private lateinit var statusText: TextView
     private lateinit var btText: TextView
     private lateinit var devText: TextView
@@ -174,6 +176,8 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
         hudSub = label("", 18f, 0xFFEAF0FF.toInt()).apply { gravity = Gravity.CENTER }
         hud.addView(hudTitle)
         hud.addView(hudSub, LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(14) })
+        hudStats = label("", 16f, 0xFF8FA3C8.toInt()).apply { gravity = Gravity.CENTER }
+        hud.addView(hudStats, LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(10) })
         root.addView(hud, FrameLayout.LayoutParams(-1, -1))
         setContentView(root)
         immersive()
@@ -200,22 +204,39 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
         catch (e: Exception) { Toast.makeText(this, "Abra o Bluetooth nas configurações da TV.", Toast.LENGTH_LONG).show() }
     }
 
-    private val a11yId: String by lazy { ComponentName(this, KeyFilterService::class.java).flattenToString() }
+    /** Liga o serviço direto se o app tiver WRITE_SECURE_SETTINGS (dado uma vez por ADB). */
+    private fun tryEnableService(): Boolean = A11yEnabler.enable(this)
 
-    /** Liga o serviço direto, se o app tiver recebido WRITE_SECURE_SETTINGS por ADB (não depende da tela de Acessibilidade). */
-    private fun tryEnableService(): Boolean {
-        if (checkSelfPermission("android.permission.WRITE_SECURE_SETTINGS") != PackageManager.PERMISSION_GRANTED) return false
-        return try {
-            val cur = Settings.Secure.getString(contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES) ?: ""
-            if (!cur.split(':').contains(a11yId)) {
-                Settings.Secure.putString(
-                    contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES,
-                    if (cur.isEmpty()) a11yId else "$cur:$a11yId"
-                )
+    private var a11yTry = 0
+
+    /** Telas de Acessibilidade que ESTA TV realmente tem: as que atendem a ação padrão, as conhecidas e as achadas varrendo os apps de configurações. */
+    private fun a11yCandidates(): List<Intent> {
+        val out = LinkedHashMap<String, Intent>()
+        fun add(pkg: String, cls: String) { if (!out.containsKey("$pkg/$cls")) out["$pkg/$cls"] = Intent().setClassName(pkg, cls) }
+        try {
+            for (ri in packageManager.queryIntentActivities(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS), 0))
+                add(ri.activityInfo.packageName, ri.activityInfo.name)
+        } catch (_: Exception) {}
+        add("com.android.tv.settings", "com.android.tv.settings.accessibility.AccessibilityActivity")
+        add("com.android.settings", "com.android.settings.accessibility.AccessibilitySettings")
+        add("com.android.settings", "com.android.settings.Settings\$AccessibilitySettingsActivity")
+        try {
+            for (ai in packageManager.getInstalledApplications(0)) {
+                if ((ai.flags and ApplicationInfo.FLAG_SYSTEM) == 0 || !ai.packageName.contains("settings", true)) continue
+                val pi = try { packageManager.getPackageInfo(ai.packageName, PackageManager.GET_ACTIVITIES) } catch (_: Exception) { continue }
+                val acts = pi.activities ?: continue
+                for (a in acts) if (a.exported && a.name.contains("accessib", true)) add(a.packageName, a.name)
             }
-            Settings.Secure.putInt(contentResolver, Settings.Secure.ACCESSIBILITY_ENABLED, 1)
-            true
-        } catch (e: Exception) { false }
+        } catch (_: Exception) {}
+        fun score(i: Intent): Int {
+            val n = i.component?.className ?: ""
+            return when {
+                n.contains("AccessibilitySettings") -> 0
+                n.contains("AccessibilityActivity") -> 1
+                else -> 2
+            }
+        }
+        return out.values.filter { it.resolveActivity(packageManager) != null }.sortedBy { score(it) }
     }
 
     private fun openAccessibility() {
@@ -224,15 +245,19 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
             main.postDelayed({ update() }, 1000)
             return
         }
-        // só abre telas que EXISTEM nesta TV (evita o erro "nenhuma atividade para esta ação")
-        val tries = listOf(
-            Intent().setClassName("com.android.tv.settings", "com.android.tv.settings.accessibility.AccessibilityActivity"),
-            Intent().setClassName("com.android.settings", "com.android.settings.accessibility.AccessibilitySettings"),
-            Intent().setClassName("com.android.settings", "com.android.settings.Settings\$AccessibilitySettingsActivity")
-        )
-        for (i in tries) {
-            if (i.resolveActivity(packageManager) == null) continue
-            try { startActivity(i); return } catch (_: Exception) {}
+        val list = a11yCandidates()
+        for (k in list.indices) {
+            val idx = (a11yTry + k) % list.size
+            try {
+                startActivity(list[idx])
+                a11yTry = idx + 1
+                Toast.makeText(
+                    this,
+                    "Abrindo Acessibilidade (${idx + 1}/${list.size}): ${list[idx].component?.shortClassName}. Se aparecer erro, toque de novo para tentar a próxima tela.",
+                    Toast.LENGTH_LONG
+                ).show()
+                return
+            } catch (_: Exception) {}
         }
         showAdbHelp()
     }
@@ -247,21 +272,23 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
     /** Passo a passo (uma vez só) para TVs sem a tela de Acessibilidade: liga o serviço por ADB, sem abrir tela nenhuma. */
     private fun showAdbHelp() {
         val ip = localIp()
-        val msg = "Esta TV não tem a tela de Acessibilidade. Ligue o bloqueio uma única vez por ADB, " +
-            "pelo Termux do celular (celular e TV na mesma rede):\n\n" +
+        val msg = "Não consegui abrir a tela de Acessibilidade sozinho.\n\n" +
+            "Jeito manual: Configurações > Preferências do dispositivo > Acessibilidade > PonteTV Hub > ligar.\n\n" +
+            "Jeito automático (uma vez só, e o app religa sozinho a cada vez que a TV ligar), pelo Termux do celular na mesma rede da TV:\n" +
             "1) Na TV: Configurações > Sobre > toque 7x em \"Compilação\" > Opções do desenvolvedor > ligue a Depuração USB (e a Depuração por rede, se existir).\n" +
             "2) No Termux: pkg install android-tools\n" +
             "3) No Termux: bash ativar-bloqueio.sh $ip   (o arquivo vem na pasta tools do projeto)\n" +
             "    ou, na mão: adb connect $ip:5555 e depois adb shell pm grant com.pontetv.tv android.permission.WRITE_SECURE_SETTINGS\n" +
-            "4) Aceite o aviso de depuração na TV e volte aqui: o bloqueio liga sozinho."
+            "4) Aceite o aviso de depuração na TV e volte aqui."
         try {
             AlertDialog.Builder(this)
                 .setTitle("Ligar o bloqueio de teclas por ADB")
                 .setMessage(msg)
                 .setPositiveButton("OK", null)
-                .setNeutralButton("Tentar a tela do sistema") { _, _ ->
-                    try { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) } catch (_: Exception) {}
+                .setNeutralButton("Abrir Configurações") { _, _ ->
+                    try { startActivity(Intent(Settings.ACTION_SETTINGS)) } catch (_: Exception) {}
                 }
+                .setNegativeButton("Tentar outra tela") { _, _ -> openAccessibility() }
                 .show()
         } catch (e: Exception) { Toast.makeText(this, msg, Toast.LENGTH_LONG).show() }
     }
@@ -291,6 +318,7 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
         if (engaged || !HidLink.connected) return
         engaged = true
         InputBridge.capturing = true
+        KeyFilterService.instance?.setFilter(true)
         panel.visibility = View.GONE
         hud.visibility = View.VISIBLE
         root.pointerIcon = PointerIcon.getSystemIcon(this, PointerIcon.TYPE_NULL)
@@ -299,7 +327,7 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
         HidLink.wake()
         updateHud()
         main.removeCallbacks(hudTick)
-        main.postDelayed(hudTick, 1000)
+        main.postDelayed(hudTick, 2000)
         main.postDelayed({ if (engaged) updateHud() }, 1300)
     }
 
@@ -315,8 +343,8 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
     private val hudTick = object : Runnable {
         override fun run() {
             if (!engaged) return
-            updateHud()
-            main.postDelayed(this, 1000)
+            updateStats()
+            main.postDelayed(this, 2000)
         }
     }
 
@@ -324,6 +352,7 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
         if (!engaged) return
         engaged = false
         InputBridge.capturing = false
+        KeyFilterService.instance?.setFilter(false)
         main.removeCallbacks(hudTick)
         if (byUser) manualOff = true
         InputBridge.releaseAll()
@@ -341,11 +370,17 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
         val soft = engaged && !root.hasPointerCapture()
         hudSub.text = "${h?.let { HidLink.nameOf(it) } ?: ""}\n\n" +
             "Teclado da TV: ${InputWatcher.kb ?: "não detectado"}\nMouse da TV: ${InputWatcher.mouse ?: "não detectado"}" +
-            "\nBluetooth: ${HidLink.statRate} envios/s · envio mais lento ${HidLink.statWorstMs} ms" +
-            (if (HidLink.bleMode) "\nModo BLE · intervalo de conexão: ${BleHid.boostInfo}"
-             else "\nMouse: até ${HidLink.moveHz} Hz (F9 troca) · Keepalive: ${if (HidLink.keepAlive) "ligado" else "desligado"} (F10 liga/desliga)") +
             (if (soft) "\n(modo alternativo de mouse: esta TV não liberou a captura)" else "") +
             "\n\nF8 solta o teclado e o mouse para usar na TV (ou VOLTAR do controle remoto)"
+        updateStats()
+    }
+
+    /** Só este TextView muda a cada 2 s (pouco trabalho de layout na thread que recebe o mouse). */
+    private fun updateStats() {
+        val t = "Bluetooth: ${HidLink.statRate} envios/s · envio mais lento ${HidLink.statWorstMs} ms\n" +
+            (if (HidLink.bleMode) "Modo BLE · intervalo de conexão: ${BleHid.boostInfo}"
+             else "Mouse: até ${HidLink.moveHz} Hz (F9 troca) · Keepalive: ${if (HidLink.keepAlive) "ligado" else "desligado"} (F10 liga/desliga)")
+        if (hudStats.text.toString() != t) hudStats.text = t
     }
 
     override fun onHidState() { update() }
@@ -402,6 +437,7 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
         if (engaged) {
             engaged = false
             InputBridge.capturing = false
+            KeyFilterService.instance?.setFilter(false)
             main.removeCallbacks(hudTick)
             InputBridge.releaseAll()
             if (root.hasPointerCapture()) root.releasePointerCapture()

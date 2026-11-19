@@ -113,10 +113,7 @@ object InputBridge {
     }
 
     private fun sendMouse(x: Int, y: Int, v: Int, h: Int) {
-        HidLink.send(
-            HidDescriptor.ID_MOUSE,
-            byteArrayOf(buttons.toByte(), x.toByte(), y.toByte(), v.toByte(), h.toByte())
-        )
+        HidLink.sendMouse(buttons, x, y, v, h)
     }
 
     /** Solta todas as teclas e botões no celular (ao parar de controlar, trocar de app ou desconectar). */
