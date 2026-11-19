@@ -1,5 +1,6 @@
 package com.pontetv.tv
 
+import android.os.SystemClock
 import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.MotionEvent
@@ -17,6 +18,21 @@ object InputBridge {
     /** true enquanto o teclado/mouse da TV estão controlando o celular. */
     @Volatile var capturing = false
 
+    /** Diagnóstico: pior tempo entre o evento nascer (teclado/mouse USB) e o app da TV processá-lo. Alto = a TV está sobrecarregada. */
+    @Volatile var deliveryMaxMs = 0
+    fun resetDiag() { deliveryMaxMs = 0 }
+    private fun noteDelivery(eventTime: Long) {
+        val d = (SystemClock.uptimeMillis() - eventTime).toInt()
+        if (d > deliveryMaxMs) deliveryMaxMs = d
+    }
+
+    /** A tecla deste evento está apertada agora? (um "soltar" que chega sem o dispositivo — USB que sumiu — precisa ser aceito.) */
+    fun isHeld(e: KeyEvent): Boolean {
+        val u = HidKeys.usage(e)
+        if (u == 0) return false
+        return if (u in 0xE0..0xE7) (mods and (1 shl (u - 0xE0))) != 0 else keys.contains(u)
+    }
+
     fun isKeyboard(e: KeyEvent): Boolean {
         val d = e.device ?: return false
         return d.keyboardType == InputDevice.KEYBOARD_TYPE_ALPHABETIC &&
@@ -25,6 +41,7 @@ object InputBridge {
 
     // ---------------- teclado ----------------
     fun key(e: KeyEvent) {
+        noteDelivery(e.eventTime)
         if (e.action != KeyEvent.ACTION_DOWN && e.action != KeyEvent.ACTION_UP) return
         val down = e.action == KeyEvent.ACTION_DOWN
         if (down && e.repeatCount > 0) return // quem repete a tecla é o celular
@@ -51,6 +68,7 @@ object InputBridge {
     // ---------------- mouse ----------------
     /** Ponteiro capturado: o Android entrega só deslocamentos relativos (o cursor some da TV). */
     fun captured(e: MotionEvent) {
+        noteDelivery(e.eventTime)
         when (e.actionMasked) {
             MotionEvent.ACTION_MOVE, MotionEvent.ACTION_HOVER_MOVE -> {
                 var dx = e.x

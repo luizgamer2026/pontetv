@@ -442,6 +442,7 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
         val t = "Bluetooth: ${HidLink.statRate} envios/s · envio mais lento ${HidLink.statWorstMs} ms\n" +
             "Travadas — fila: ${HidLink.statLagMax} ms · envio: ${HidLink.statStallMax} ms · quedas do link: ${HidLink.linkDrops} · " +
             "foco perdido: ${focusLost}x${if (focusLost > 0) " (última ${focusLastMs} ms)" else ""}\n" +
+            "Na TV — entrega das teclas/mouse (pior): ${InputBridge.deliveryMaxMs} ms · USB removido/religado: ${InputWatcher.removals}x\n" +
             (if (HidLink.bleMode) "Modo BLE · intervalo de conexão: ${BleHid.boostInfo}"
              else "Mouse: até ${HidLink.moveHz} Hz (← → no controle remoto ou Insert) · Keepalive: ${if (HidLink.keepAlive) "ligado" else "desligado"} (OK no controle ou Pause)")
         if (hudStats.text.toString() != t) hudStats.text = t
@@ -516,7 +517,7 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
         super.onPause()
     }
 
-    private fun resetDiag() { HidLink.resetStats(); focusLost = 0; focusLastMs = 0 }
+    private fun resetDiag() { HidLink.resetStats(); InputBridge.resetDiag(); InputWatcher.removals = 0; focusLost = 0; focusLastMs = 0 }
 
     /** Se o mouse perdeu a captura (janela da TV por cima, etc.), pega de volta assim que der. */
     override fun onPointerCaptureChanged(hasCapture: Boolean) {
@@ -565,7 +566,7 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
             if (usable) { if (down) handleCommand(cmd); return true }
         }
         if (engaged) {
-            if (kb) { InputBridge.key(e); return true }
+            if (kb || (e.action == KeyEvent.ACTION_UP && InputBridge.isHeld(e))) { InputBridge.key(e); return true }
             when (e.keyCode) {
                 // controle remoto: ← → trocam o ritmo do mouse, OK liga/desliga o keepalive
                 KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT -> { if (down) handleCommand(HubCommands.RATE); return true }

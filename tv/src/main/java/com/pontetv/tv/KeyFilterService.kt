@@ -48,7 +48,9 @@ class KeyFilterService : AccessibilityService() {
         return try {
             when {
                 !InputBridge.capturing || !HidLink.connected -> false
-                !InputBridge.isKeyboard(event) -> false
+                !InputBridge.isKeyboard(event) ->
+                    // "soltar" sem dispositivo (USB que sumiu) de uma tecla que está apertada: aceita, senão ela fica presa
+                    if (event.action == KeyEvent.ACTION_UP && InputBridge.isHeld(event)) { InputBridge.key(event); true } else false
                 else -> {
                     val cmd = HubCommands.forKey(event.keyCode)
                     if (cmd != 0) {

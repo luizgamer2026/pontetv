@@ -36,6 +36,13 @@ Módulos: `phone` (Android 10+, pareia e mostra "Teclado e mouse conectados") ·
 * A imagem do celular na TV não faz parte do app (use o espelhamento nativo/cabo, se quiser).
 * Velocidade do mouse: configuração de ponteiro do próprio celular.
 
+## v2.8: USB que some e diagnóstico da TV
+
+* **USB removido/religado:** se o teclado ou o mouse USB sumir da TV (cabo, hub, energia), todas as teclas e botões são soltos no celular na hora,
+  e um "soltar" que chegar sem o dispositivo (cancelado pelo Android) ainda é aceito. Antes a tecla podia ficar presa até o jogo acabar.
+* **HUD:** nova linha `Na TV — entrega das teclas/mouse (pior): X ms · USB removido/religado: N×`. Entrega alta = a própria TV está sobrecarregada
+  (por exemplo, decodificando espelhamento de tela); remoções > 0 = o USB está caindo; as duas baixas = o problema é no Bluetooth ou no celular.
+
 ## v2.7: tecla presa, comandos sem F9 e descrição na Release
 
 * **Tecla presa:** o estado do teclado é reenviado a cada ~250 ms com o controle ativo (se um "soltar" se perder, a tecla é solta sozinha),

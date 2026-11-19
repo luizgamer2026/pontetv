@@ -4,6 +4,7 @@ import android.content.Context
 import android.hardware.input.InputManager
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.view.InputDevice
 
 /** Detecta (inclusive ao plugar/desplugar) o teclado e o mouse USB ligados na TV. */
@@ -15,6 +16,9 @@ object InputWatcher : InputManager.InputDeviceListener {
     @Volatile var mouse: String? = null
     @Volatile private var seenMouse: String? = null
     private var started = false
+    /** Quantas vezes algum dispositivo de entrada foi removido (USB soltando/reiniciando) desde o último zerar do diagnóstico. */
+    @Volatile var removals = 0
+    @Volatile var lastChangeAt = 0L
 
     private fun isMouse(s: Int): Boolean =
         (s and InputDevice.SOURCE_MOUSE) == InputDevice.SOURCE_MOUSE ||
@@ -52,7 +56,14 @@ object InputWatcher : InputManager.InputDeviceListener {
         listener?.onDevices(k, ms)
     }
 
-    override fun onInputDeviceAdded(deviceId: Int) { scan() }
-    override fun onInputDeviceRemoved(deviceId: Int) { seenMouse = null; scan() }
+    override fun onInputDeviceAdded(deviceId: Int) { lastChangeAt = SystemClock.uptimeMillis(); scan() }
+    override fun onInputDeviceRemoved(deviceId: Int) {
+        removals++
+        lastChangeAt = SystemClock.uptimeMillis()
+        seenMouse = null
+        // o teclado USB sumiu (cabo, hub, energia): nenhuma tecla pode ficar presa no celular
+        InputBridge.releaseAll()
+        scan()
+    }
     override fun onInputDeviceChanged(deviceId: Int) { scan() }
 }
