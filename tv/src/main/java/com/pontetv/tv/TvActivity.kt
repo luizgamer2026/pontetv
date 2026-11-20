@@ -54,6 +54,10 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
     private var focusLostAt = 0L
     private var focusLastMs = 0
     private var lastFocusAt = 0L
+    private var pauses = 0
+    private var lastPauseAt = 0L
+    private var lastPauseMs = 0
+    private var pausedAt = 0L
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
@@ -446,6 +450,10 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
             "Na TV — entrega das teclas/mouse (pior): ${InputBridge.deliveryMaxMs} ms · USB removido/religado: ${InputWatcher.removals}x\n" +
             "Há quanto tempo — envio travado: ${ago(HidLink.lastStallAt)}${if (HidLink.lastStallAt != 0L) " (${HidLink.lastStallMs} ms)" else ""}" +
             " · queda do link: ${ago(HidLink.lastDropAt)} · USB mexeu: ${ago(InputWatcher.lastChangeAt)} · foco: ${ago(lastFocusAt)}\n" +
+            "App saiu da frente (menu/aviso da TV): ${pauses}x${if (pauses > 0) " (última ${ago(lastPauseAt)}, ficou ${lastPauseMs} ms fora)" else ""}" +
+            (if (HidLink.bootProtocol) " · PROTOCOLO BOOT" else "") +
+            (if (HidLink.workerRestarts > 0) " · thread de envio reiniciada ${HidLink.workerRestarts}x" else "") +
+            (if (HidLink.lastError.isNotEmpty()) " · erro: ${HidLink.lastError}" else "") + "\n" +
             (if (HidLink.bleMode) "Modo BLE · intervalo de conexão: ${BleHid.boostInfo}"
              else "Mouse: até ${HidLink.moveHz} Hz (← → no controle remoto ou Insert) · Keepalive: ${if (HidLink.keepAlive) "ligado" else "desligado"} (OK no controle ou Pause)")
         if (hudStats.text.toString() != t) hudStats.text = t
@@ -494,6 +502,7 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
     // ---------------- ciclo de vida ----------------
     override fun onResume() {
         super.onResume()
+        if (pausedAt != 0L) { lastPauseMs = (SystemClock.uptimeMillis() - pausedAt).toInt(); pausedAt = 0L }
         HidLink.listener = this
         InputWatcher.listener = this
         HubCommands.handler = { handleCommand(it) }
@@ -504,6 +513,10 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
     override fun onPause() {
         // fora da frente a TV não recebe mais o teclado/mouse: solta tudo no celular
         if (engaged) {
+            // o app saiu da frente (menu/aviso/outro app da TV por cima): registra para o diagnóstico
+            pauses++
+            pausedAt = SystemClock.uptimeMillis()
+            lastPauseAt = pausedAt
             engaged = false
             InputBridge.capturing = false
             KeyFilterService.instance?.setFilter(false)
@@ -522,7 +535,7 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
 
     private fun ago(t: Long): String = if (t == 0L) "nunca" else "${(SystemClock.uptimeMillis() - t) / 1000}s atrás"
 
-    private fun resetDiag() { HidLink.resetStats(); InputBridge.resetDiag(); InputWatcher.removals = 0; InputWatcher.lastChangeAt = 0L; focusLost = 0; focusLastMs = 0; lastFocusAt = 0L }
+    private fun resetDiag() { HidLink.resetStats(); InputBridge.resetDiag(); InputWatcher.removals = 0; InputWatcher.lastChangeAt = 0L; focusLost = 0; focusLastMs = 0; lastFocusAt = 0L; pauses = 0; lastPauseAt = 0L; lastPauseMs = 0 }
 
     /** Se o mouse perdeu a captura (janela da TV por cima, etc.), pega de volta assim que der. */
     override fun onPointerCaptureChanged(hasCapture: Boolean) {

@@ -36,6 +36,16 @@ Módulos: `phone` (Android 10+, pareia e mostra "Teclado e mouse conectados") ·
 * A imagem do celular na TV não faz parte do app (use o espelhamento nativo/cabo, se quiser).
 * Velocidade do mouse: configuração de ponteiro do próprio celular.
 
+## v2.10: auditoria do HID
+
+* **Thread de envio à prova de erro:** qualquer exceção inesperada no laço de envio agora é registrada (`erro:` no HUD) em vez de matar a thread
+  em silêncio (o que pararia todo o envio até reiniciar o app); se a thread morrer mesmo assim, é recriada (`thread de envio reiniciada Nx`).
+* **Espera ociosa com limite (0,5 s):** qualquer "acordar" perdido se cura sozinho.
+* **Protocolo BOOT:** se o celular pedir `SET_PROTOCOL` em modo BOOT, os relatórios passam a ir sem ID (mouse de 3 bytes) até voltar ao modo normal;
+  antes eles seriam ignorados pelo celular. O HUD mostra `PROTOCOLO BOOT` quando isso acontece.
+* **Reconexão sem colisão:** a TV espera 2,5 s antes da 1ª tentativa de reconectar (4 s, 6 s…), para não disputar a conexão com o próprio celular.
+* **HUD:** `App saiu da frente (menu/aviso da TV): Nx (última há Ns, ficou X ms fora)`.
+
 ## v2.9: linha do tempo das travadas
 
 * O HUD ganhou `Há quanto tempo — envio travado (duração) · queda do link · USB mexeu · foco`. Tirando foto do HUD logo depois de uma parada do

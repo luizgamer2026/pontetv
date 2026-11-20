@@ -104,17 +104,23 @@ object HidLink {
     @Volatile var lastStallAt = 0L
     @Volatile var lastStallMs = 0
     @Volatile var lastDropAt = 0L
+    /** Se a thread de envio morrer por algum erro inesperado ela é recriada (e isto conta); o último erro fica aqui. */
+    @Volatile var workerRestarts = 0
+    @Volatile var lastError = ""
+    /** O celular pediu protocolo BOOT (relatórios sem ID e mouse de 3 bytes): o envio se adapta até ele voltar ao modo normal. */
+    @Volatile var bootProtocol = false
+    private var worker: Thread? = null
     fun resetStats() { statLagMax = 0; statStallMax = 0; statCollapsed = 0; lastStallAt = 0L; lastStallMs = 0; lastDropAt = 0L }
 
     private var userDisc = false
     private var retry = 0
     private val retryRun = Runnable { if (host == null && !userDisc && !bleMode) { autoConnect(); scheduleReconnect() } }
 
-    /** Link caiu sem o usuário pedir: a TV tenta reconectar logo (0,3 s, 0,8 s, 1,5 s, 2,5 s, 4 s…), sem esperar o celular. */
+    /** Link caiu sem o usuário pedir: a TV tenta reconectar logo (2,5 s, 4 s, 6 s…): primeiro dá tempo de o próprio celular reconectar, para as duas pontas não colidirem. */
     private fun scheduleReconnect() {
         if (userDisc || bleMode || retry >= 12) return
         main.removeCallbacks(retryRun)
-        main.postDelayed(retryRun, longArrayOf(300, 800, 1500, 2500, 4000)[minOf(retry, 4)])
+        main.postDelayed(retryRun, longArrayOf(2500, 4000, 6000, 8000, 10000)[minOf(retry, 4)])
         retry++
     }
 
@@ -235,6 +241,7 @@ object HidLink {
                     status = "Conectado."
                     retry = 0
                     userDisc = false
+                    bootProtocol = false
                     main.removeCallbacks(retryRun)
                 }
                 BluetoothProfile.STATE_CONNECTING -> status = "Conectando…"
@@ -258,6 +265,10 @@ object HidLink {
                 HidDescriptor.ID_MOUSE -> h.replyReport(d, type, id, ByteArray(HidDescriptor.MOUSE_SIZE))
                 else -> h.reportError(d, BluetoothHidDevice.ERROR_RSP_UNSUPPORTED_REQ)
             }
+        }
+
+        override fun onSetProtocol(device: BluetoothDevice?, protocol: Byte) {
+            bootProtocol = protocol.toInt() == 0 // 0 = BOOT, 1 = REPORT
         }
 
         override fun onSetReport(device: BluetoothDevice?, type: Byte, id: Byte, data: ByteArray?) {
@@ -368,6 +379,7 @@ object HidLink {
      * Relatórios de mouse seguidos com os mesmos botões são somados em um só enquanto esperam a vez.
      */
     fun send(id: Int, data: ByteArray) {
+        ensureWorker()
         if (id == HidDescriptor.ID_KEYBOARD) lastKb = data
         if (id == HidDescriptor.ID_MOUSE && data.size == HidDescriptor.MOUSE_SIZE) lastButtons = data[0].toInt() and 0x1F
         if (host == null) return
@@ -383,6 +395,7 @@ object HidLink {
 
     /** Mouse sem alocar nada quando o movimento é somado a um relatório que ainda não saiu (o caso comum a 1000 Hz). */
     fun sendMouse(btn: Int, x: Int, y: Int, v: Int, h: Int) {
+        ensureWorker()
         val bt = btn and 0x1F
         lastButtons = bt
         if (host == null) return
@@ -451,10 +464,17 @@ object HidLink {
         try { queue.clear() } finally { qLock.unlock() }
     }
 
-    private fun startWorker() {
-        if (workerRun) return
+    @Synchronized private fun startWorker() {
+        val w = worker
+        if (w != null && w.isAlive) return
+        if (w != null) workerRestarts++
         workerRun = true
-        Thread({ pump() }, "PonteTV-HID").apply { isDaemon = true; start() }
+        worker = Thread({ pump() }, "PonteTV-HID").apply { isDaemon = true; start() }
+    }
+
+    private fun ensureWorker() {
+        val w = worker
+        if (w == null || !w.isAlive) startWorker()
     }
 
     /** Próximo relatório a enviar (espera a fila, respeita o ritmo do movimento e gera o keepalive). */
@@ -471,7 +491,7 @@ object HidLink {
                             if (System.nanoTime() - lastKbSent >= REFRESH_NS) return Report(HidDescriptor.ID_KEYBOARD, lastKb.copyOf())
                             if (ka) return Report(HidDescriptor.ID_MOUSE, byteArrayOf(lastButtons.toByte(), 0, 0, 0, 0))
                         }
-                    } else qCond.await()
+                    } else qCond.awaitNanos(500_000_000L)
                     continue
                 }
                 if (isMove(head)) {
@@ -492,7 +512,10 @@ object HidLink {
             (r.id == HidDescriptor.ID_MOUSE && r.data[0].toInt() != sentButtons)
         var tries = 0
         while (true) {
-            val ok = try { h?.sendReport(d, r.id, r.data) == true } catch (_: Exception) { false }
+            val boot = bootProtocol
+            val sid = if (boot) 0 else r.id
+            val sdata = if (boot && r.id == HidDescriptor.ID_MOUSE) r.data.copyOf(3) else r.data
+            val ok = try { h?.sendReport(d, sid, sdata) == true } catch (_: Exception) { false }
             if (ok || !important || ++tries >= 5 || host == null) return
             try { Thread.sleep(3) } catch (_: InterruptedException) { return }
         }
@@ -505,30 +528,36 @@ object HidLink {
         var count = 0
         var worst = 0L
         while (workerRun) {
-            val r = nextReport() ?: break
-            val h = hid
-            val d = host
-            val ble = bleMode
-            if (d == null || (!ble && h == null)) { clearQueue(); continue }
-            val t0 = System.nanoTime()
-            if (r.id == HidDescriptor.ID_KEYBOARD) lastKbSent = t0
-            val lagMs = ((t0 - r.t) / 1_000_000L).toInt()
-            if (lagMs > statLagMax) statLagMax = lagMs
-            // BLE: o ritmo é ditado pela confirmação da notificação (BleHid.send espera); só um piso de 2 ms
-            if (isMove(r)) nextMoveAt = t0 + (if (ble) 2L else GAPS_MS[gapIdx]) * 1_000_000L
-            if (ble) BleHid.send(r.id, r.data) else sendClassic(h, d, r)
-            if (r.id == HidDescriptor.ID_MOUSE && r.data.size == HidDescriptor.MOUSE_SIZE) sentButtons = r.data[0].toInt()
-            val dt = System.nanoTime() - t0
-            Adpf.report(hint, dt)
-            val dtMs = (dt / 1_000_000L).toInt()
-            if (dtMs > statStallMax) statStallMax = dtMs
-            if (dtMs >= 500) { lastStallAt = SystemClock.uptimeMillis(); lastStallMs = dtMs }
-            count++
-            if (dt > worst) worst = dt
-            if (t0 - winStart >= 1_000_000_000L) {
-                statRate = count
-                statWorstMs = (worst / 1_000_000L).toInt()
-                count = 0; worst = 0L; winStart = t0
+            try {
+                val r = nextReport() ?: break
+                val h = hid
+                val d = host
+                val ble = bleMode
+                if (d == null || (!ble && h == null)) { clearQueue(); continue }
+                val t0 = System.nanoTime()
+                if (r.id == HidDescriptor.ID_KEYBOARD) lastKbSent = t0
+                val lagMs = ((t0 - r.t) / 1_000_000L).toInt()
+                if (lagMs > statLagMax) statLagMax = lagMs
+                // BLE: o ritmo é ditado pela confirmação da notificação (BleHid.send espera); só um piso de 2 ms
+                if (isMove(r)) nextMoveAt = t0 + (if (ble) 2L else GAPS_MS[gapIdx]) * 1_000_000L
+                if (ble) BleHid.send(r.id, r.data) else sendClassic(h, d, r)
+                if (r.id == HidDescriptor.ID_MOUSE && r.data.size == HidDescriptor.MOUSE_SIZE) sentButtons = r.data[0].toInt()
+                val dt = System.nanoTime() - t0
+                Adpf.report(hint, dt)
+                val dtMs = (dt / 1_000_000L).toInt()
+                if (dtMs > statStallMax) statStallMax = dtMs
+                if (dtMs >= 500) { lastStallAt = SystemClock.uptimeMillis(); lastStallMs = dtMs }
+                count++
+                if (dt > worst) worst = dt
+                if (t0 - winStart >= 1_000_000_000L) {
+                    statRate = count
+                    statWorstMs = (worst / 1_000_000L).toInt()
+                    count = 0; worst = 0L; winStart = t0
+                }
+            } catch (t: Throwable) {
+                // nenhum erro inesperado pode matar o envio: registra, espera um instante e segue
+                lastError = t.javaClass.simpleName + (t.message?.let { ": $it" } ?: "")
+                try { Thread.sleep(5) } catch (_: InterruptedException) {}
             }
         }
     }
