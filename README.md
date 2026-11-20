@@ -36,6 +36,13 @@ Módulos: `phone` (Android 10+, pareia e mostra "Teclado e mouse conectados") ·
 * A imagem do celular na TV não faz parte do app (use o espelhamento nativo/cabo, se quiser).
 * Velocidade do mouse: configuração de ponteiro do próprio celular.
 
+## v2.9: linha do tempo das travadas
+
+* O HUD ganhou `Há quanto tempo — envio travado (duração) · queda do link · USB mexeu · foco`. Tirando foto do HUD logo depois de uma parada do
+  teclado, dá para ver qual evento aconteceu junto com ela (um `sendReport` que ficou ~2 s preso dentro do Bluetooth da TV, o link caindo,
+  o USB removido ou uma janela da TV tomando o foco).
+* `GET_REPORT` do celular agora é respondido com o estado real do teclado.
+
 ## v2.8: USB que some e diagnóstico da TV
 
 * **USB removido/religado:** se o teclado ou o mouse USB sumir da TV (cabo, hub, energia), todas as teclas e botões são soltos no celular na hora,

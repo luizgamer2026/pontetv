@@ -16,6 +16,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.Process
+import android.os.SystemClock
 import java.util.concurrent.Executors
 import java.util.concurrent.locks.Condition
 import java.util.concurrent.locks.ReentrantLock
@@ -99,7 +100,11 @@ object HidLink {
     @Volatile var statStallMax = 0
     @Volatile var statCollapsed = 0
     @Volatile var linkDrops = 0
-    fun resetStats() { statLagMax = 0; statStallMax = 0; statCollapsed = 0 }
+    /** Linha do tempo (uptime em ms) da última travada de envio (>= 500 ms), com a duração, e da última queda do link. */
+    @Volatile var lastStallAt = 0L
+    @Volatile var lastStallMs = 0
+    @Volatile var lastDropAt = 0L
+    fun resetStats() { statLagMax = 0; statStallMax = 0; statCollapsed = 0; lastStallAt = 0L; lastStallMs = 0; lastDropAt = 0L }
 
     private var userDisc = false
     private var retry = 0
@@ -235,7 +240,7 @@ object HidLink {
                 BluetoothProfile.STATE_CONNECTING -> status = "Conectando…"
                 BluetoothProfile.STATE_DISCONNECTED -> {
                     if (host?.address == device?.address) {
-                        if (host != null) linkDrops++
+                        if (host != null) { linkDrops++; lastDropAt = SystemClock.uptimeMillis() }
                         host = null; clearQueue()
                         main.post { scheduleReconnect() }
                     }
@@ -249,7 +254,7 @@ object HidLink {
             val h = hid ?: return
             val d = device ?: return
             when (id.toInt()) {
-                HidDescriptor.ID_KEYBOARD -> h.replyReport(d, type, id, ByteArray(HidDescriptor.KEYBOARD_SIZE))
+                HidDescriptor.ID_KEYBOARD -> h.replyReport(d, type, id, lastKb)
                 HidDescriptor.ID_MOUSE -> h.replyReport(d, type, id, ByteArray(HidDescriptor.MOUSE_SIZE))
                 else -> h.reportError(d, BluetoothHidDevice.ERROR_RSP_UNSUPPORTED_REQ)
             }
@@ -291,7 +296,7 @@ object HidLink {
         when {
             d != null && ready -> { host = d; status = "Conectado (BLE)." }
             d != null -> status = "BLE: celular conectando…"
-            else -> { if (host != null) linkDrops++; host = null; clearQueue(); status = "BLE: aguardando o celular." }
+            else -> { if (host != null) { linkDrops++; lastDropAt = SystemClock.uptimeMillis() }; host = null; clearQueue(); status = "BLE: aguardando o celular." }
         }
         notifyState()
     }
@@ -517,6 +522,7 @@ object HidLink {
             Adpf.report(hint, dt)
             val dtMs = (dt / 1_000_000L).toInt()
             if (dtMs > statStallMax) statStallMax = dtMs
+            if (dtMs >= 500) { lastStallAt = SystemClock.uptimeMillis(); lastStallMs = dtMs }
             count++
             if (dt > worst) worst = dt
             if (t0 - winStart >= 1_000_000_000L) {

@@ -53,6 +53,7 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
     private var focusLost = 0
     private var focusLostAt = 0L
     private var focusLastMs = 0
+    private var lastFocusAt = 0L
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
@@ -443,6 +444,8 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
             "Travadas — fila: ${HidLink.statLagMax} ms · envio: ${HidLink.statStallMax} ms · quedas do link: ${HidLink.linkDrops} · " +
             "foco perdido: ${focusLost}x${if (focusLost > 0) " (última ${focusLastMs} ms)" else ""}\n" +
             "Na TV — entrega das teclas/mouse (pior): ${InputBridge.deliveryMaxMs} ms · USB removido/religado: ${InputWatcher.removals}x\n" +
+            "Há quanto tempo — envio travado: ${ago(HidLink.lastStallAt)}${if (HidLink.lastStallAt != 0L) " (${HidLink.lastStallMs} ms)" else ""}" +
+            " · queda do link: ${ago(HidLink.lastDropAt)} · USB mexeu: ${ago(InputWatcher.lastChangeAt)} · foco: ${ago(lastFocusAt)}\n" +
             (if (HidLink.bleMode) "Modo BLE · intervalo de conexão: ${BleHid.boostInfo}"
              else "Mouse: até ${HidLink.moveHz} Hz (← → no controle remoto ou Insert) · Keepalive: ${if (HidLink.keepAlive) "ligado" else "desligado"} (OK no controle ou Pause)")
         if (hudStats.text.toString() != t) hudStats.text = t
@@ -517,7 +520,9 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
         super.onPause()
     }
 
-    private fun resetDiag() { HidLink.resetStats(); InputBridge.resetDiag(); InputWatcher.removals = 0; focusLost = 0; focusLastMs = 0 }
+    private fun ago(t: Long): String = if (t == 0L) "nunca" else "${(SystemClock.uptimeMillis() - t) / 1000}s atrás"
+
+    private fun resetDiag() { HidLink.resetStats(); InputBridge.resetDiag(); InputWatcher.removals = 0; InputWatcher.lastChangeAt = 0L; focusLost = 0; focusLastMs = 0; lastFocusAt = 0L }
 
     /** Se o mouse perdeu a captura (janela da TV por cima, etc.), pega de volta assim que der. */
     override fun onPointerCaptureChanged(hasCapture: Boolean) {
@@ -535,6 +540,7 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
             InputBridge.releaseAll()
             focusLost++
             focusLostAt = SystemClock.uptimeMillis()
+            lastFocusAt = focusLostAt
         }
         if (hasFocus && focusLostAt != 0L) {
             focusLastMs = (SystemClock.uptimeMillis() - focusLostAt).toInt()
