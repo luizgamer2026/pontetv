@@ -73,6 +73,7 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
         Diag.filterEnabled = prefs.filterOn
         HidLink.init(this)
         build()
+        InputWatcher.onTopology = { scheduleRecapture() }
         InputWatcher.start(this)
         requestBtPermissions()
     }
@@ -492,6 +493,13 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
             "TV — RAM livre: ${if (Diag.availMb >= 0) "${Diag.availMb} MB" else "?"} · pouca memória: ${if (Diag.lowMemory) "SIM" else "não"}" +
             " (avisos do sistema: ${Diag.trimCount}x) · GC que bloqueou o app: ${Diag.gcBlockMs} ms (${Diag.gcBlockCount}x)\n" +
             "Bloqueio de teclas: $filt · resposta do serviço: até ${KeyFilterService.maxMs} ms em ${KeyFilterService.calls} teclas (↑ ↓ no controle ou Scroll Lock alterna)\n" +
+            "Teclado — eventos recebidos: ${InputBridge.keyEvents}" +
+            (if (InputBridge.lastKeyAt != 0L) " (última ${InputBridge.lastKeyName}, ${ago(InputBridge.lastKeyAt)})" else "") +
+            " · apertadas agora (app): ${InputBridge.heldText()}" +
+            " · sem mapeamento: ${InputBridge.unmapped}x${if (InputBridge.unmapped > 0) " (${InputBridge.lastUnmapped})" else ""}" +
+            " · passou de 6 teclas: ${InputBridge.overflow}x · recusadas pelo Bluetooth: ${HidLink.kbFail}x\n" +
+            "Entrada na TV agora: ${InputWatcher.present.ifEmpty { "nenhuma" }}" +
+            (InputWatcher.recent().let { ev -> if (ev.isEmpty()) "" else "\nÚltimos: " + ev.joinToString(" · ") { "${it.second} (${ago(it.first)})" } }) + "\n" +
             "Há quanto tempo — envio travado: ${ago(HidLink.lastStallAt)}${if (HidLink.lastStallAt != 0L) " (${HidLink.lastStallMs} ms)" else ""}" +
             " · queda do link: ${ago(HidLink.lastDropAt)} · USB mexeu: ${ago(InputWatcher.lastChangeAt)} · foco: ${ago(lastFocusAt)}\n" +
             "App saiu da frente (menu/aviso da TV): ${pauses}x${if (pauses > 0) " (última ${ago(lastPauseAt)}, ficou ${lastPauseMs} ms fora)" else ""}" +
@@ -596,6 +604,19 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
         super.onTrimMemory(level)
         Diag.trimCount++
         Diag.trimLevel = level
+    }
+
+    /**
+     * O USB do teclado/mouse soltou e voltou (a TV recria o dispositivo): pede a captura do mouse de novo, para o mouse novo
+     * não ficar fora dela. Soltar a captura dispara o onPointerCaptureChanged, que captura outra vez.
+     */
+    private val recapture = Runnable {
+        if (engaged && hasWindowFocus()) { if (root.hasPointerCapture()) root.releasePointerCapture() else capturePointer() }
+    }
+    private fun scheduleRecapture() {
+        if (!engaged) return
+        main.removeCallbacks(recapture)
+        main.postDelayed(recapture, 400)
     }
 
     private fun ago(t: Long): String = if (t == 0L) "nunca" else "${(SystemClock.uptimeMillis() - t) / 1000}s atrás"

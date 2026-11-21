@@ -50,6 +50,14 @@ chegar ao app**. Mudanças:
   Bluetooth da TV (ligado, nome, pareados) eram chamadas síncronas na thread principal; se o `system_server` ou o Bluetooth da TV
   estivessem parados, F8/VOLTAR/F9 ficavam presos junto (só o botão Home, que o sistema trata, saía). Agora essas chamadas rodam em threads
   próprias e o painel usa uma cópia. Os comandos do serviço também são adiados para depois de ele responder ao sistema.
+* **USB soltando e voltando:** a HUD (teste com o bloqueio desligado) mostrou entrega e thread principal saudáveis, mas `USB removido/religado: 6x`.
+  O contador contava qualquer dispositivo de entrada que sumia, até virtual, e uma tecla/mouse costuma ter mais de uma interface
+  (6 podem ser 3 soluços). Agora os virtuais não contam, a HUD mostra `Entrada na TV agora:` (nomes) e `Últimos:` (`+`/`−` nome vid:pid, há quantos segundos),
+  e quando um dispositivo real entra/sai o app pede a captura do mouse de novo.
+* **Teclado morrendo no jogo de ritmo (com o bloqueio desligado):** a HUD ganhou `Teclado — eventos recebidos (última tecla, há Ns) · apertadas agora (app) ·
+  sem mapeamento · passou de 6 teclas · recusadas pelo Bluetooth`. Assim dá para separar: o app da TV deixou de receber teclas, o app achou que havia teclas
+  presas, ou o Bluetooth recusou o envio. Reforço: com 6 teclas já marcadas como apertadas (um "soltar" perdido), a tecla nova antes era ignorada e o teclado
+  parecia morto; agora a mais antiga sai e a nova entra. Uma repetição de tecla que o app não tinha como apertada passa a contar como "apertar".
 * **Tecla presa:** se a thread principal ficar parada mais de 1,5 s, o app solta teclas e botões no celular por outra thread.
 * **O bloqueio de teclas vem DESLIGADO por padrão nesta versão de teste** (↑/↓ do controle ou Scroll Lock ligam).
 * **Prioridade da thread principal** sobe (como a de envio) enquanto o teclado/mouse controlam o celular.

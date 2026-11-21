@@ -68,6 +68,8 @@ object HidLink {
     // A cada ~250 ms (com o controle ativo) reenvia o estado do teclado: se um relatório de "soltar tecla" se perder,
     // a tecla não fica presa no celular (o reenvio de um estado igual não gera tecla nova).
     private const val REFRESH_NS = 250_000_000L
+    /** Relatórios de teclado que o Bluetooth recusou mesmo depois das 5 tentativas (a tecla não chegou ao celular). */
+    @Volatile var kbFail = 0
     @Volatile private var lastKb = ByteArray(HidDescriptor.KEYBOARD_SIZE)
     private var lastKbSent = 0L   // só a thread de envio mexe
     private var sentButtons = 0   // idem
@@ -112,7 +114,7 @@ object HidLink {
     /** O celular pediu protocolo BOOT (relatórios sem ID e mouse de 3 bytes): o envio se adapta até ele voltar ao modo normal. */
     @Volatile var bootProtocol = false
     private var worker: Thread? = null
-    fun resetStats() { statLagMax = 0; statStallMax = 0; statCollapsed = 0; lastStallAt = 0L; lastStallMs = 0; lastDropAt = 0L }
+    fun resetStats() { kbFail = 0; statLagMax = 0; statStallMax = 0; statCollapsed = 0; lastStallAt = 0L; lastStallMs = 0; lastDropAt = 0L }
 
     private var userDisc = false
     private var retry = 0
@@ -542,7 +544,10 @@ object HidLink {
             val sid = if (boot) 0 else r.id
             val sdata = if (boot && r.id == HidDescriptor.ID_MOUSE) r.data.copyOf(3) else r.data
             val ok = try { h?.sendReport(d, sid, sdata) == true } catch (_: Exception) { false }
-            if (ok || !important || ++tries >= 5 || host == null) return
+            if (ok || !important || ++tries >= 5 || host == null) {
+                if (!ok && r.id == HidDescriptor.ID_KEYBOARD) kbFail++
+                return
+            }
             try { Thread.sleep(3) } catch (_: InterruptedException) { return }
         }
     }

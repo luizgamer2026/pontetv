@@ -25,7 +25,27 @@ object InputBridge {
     /** Quantas entregas demoraram 200 ms ou mais (e quando foi a última). */
     @Volatile var spikes = 0
     @Volatile var lastSpikeAt = 0L
-    fun resetDiag() { deliveryMaxMs = 0; deliveryMaxAt = 0L; deliveryMaxKind = ""; spikes = 0; lastSpikeAt = 0L }
+    /** Diagnóstico do teclado: eventos recebidos, quando/qual foi o último, teclas sem mapeamento HID e teclas que o app acha que estão apertadas. */
+    @Volatile var keyEvents = 0
+    @Volatile var lastKeyAt = 0L
+    @Volatile var lastKeyName = ""
+    @Volatile var unmapped = 0
+    @Volatile var lastUnmapped = ""
+    @Volatile var overflow = 0   // vezes que passou de 6 teclas ao mesmo tempo
+    private val names = HashMap<Int, String>()
+    fun resetDiag() {
+        deliveryMaxMs = 0; deliveryMaxAt = 0L; deliveryMaxKind = ""; spikes = 0; lastSpikeAt = 0L
+        keyEvents = 0; lastKeyAt = 0L; lastKeyName = ""; unmapped = 0; lastUnmapped = ""; overflow = 0
+    }
+
+    /** Teclas apertadas segundo o estado interno do app (o que ele manda ao celular agora). Só na thread principal. */
+    fun heldText(): String {
+        val sb = StringBuilder()
+        val m = arrayOf("Ctrl", "Shift", "Alt", "Meta", "CtrlD", "ShiftD", "AltD", "MetaD")
+        for (i in 0..7) if ((mods and (1 shl i)) != 0) sb.append(m[i]).append(' ')
+        for (u in keys) sb.append(names[u] ?: "%02x".format(u)).append(' ')
+        return if (sb.isEmpty()) "nenhuma" else sb.toString().trim()
+    }
     private fun noteDelivery(eventTime: Long, kind: String) {
         val now = SystemClock.uptimeMillis()
         val d = (now - eventTime).toInt()
@@ -51,14 +71,23 @@ object InputBridge {
         noteDelivery(e.eventTime, "tecla")
         if (e.action != KeyEvent.ACTION_DOWN && e.action != KeyEvent.ACTION_UP) return
         val down = e.action == KeyEvent.ACTION_DOWN
-        if (down && e.repeatCount > 0) return // quem repete a tecla é o celular
         val u = HidKeys.usage(e)
-        if (u == 0) return
+        val nm = KeyEvent.keyCodeToString(e.keyCode).removePrefix("KEYCODE_")
+        keyEvents++; lastKeyAt = SystemClock.uptimeMillis(); lastKeyName = (if (down) "↓" else "↑") + nm
+        // quem repete a tecla é o celular; mas uma repetição de tecla que o app não tem como apertada é um "apertar" que se perdeu: aceita
+        if (down && e.repeatCount > 0 && isHeld(e)) return
+        if (u == 0) { unmapped++; lastUnmapped = nm; return }
         if (u in 0xE0..0xE7) {
             val bit = 1 shl (u - 0xE0)
             mods = if (down) (mods or bit) else (mods and bit.inv())
         } else if (down) {
-            if (!keys.contains(u) && keys.size < 6) keys.add(u)
+            names[u] = nm
+            if (!keys.contains(u)) {
+                // 6 teclas é o limite do relatório HID. Antes, com 6 "presas" por "soltar" perdido, o teclado parava de aceitar teclas novas:
+                // agora a mais antiga sai e a nova entra (nunca fica morto).
+                if (keys.size >= 6) { keys.removeAt(0); overflow++ }
+                keys.add(u)
+            }
         } else {
             keys.removeAll { it == u }
         }
