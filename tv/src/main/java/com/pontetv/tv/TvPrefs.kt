@@ -22,7 +22,7 @@ class TvPrefs(ctx: Context) {
 
     /** Bloqueio de teclas do sistema (filtro de acessibilidade) enquanto controla o celular. ↑/↓ do controle ou Scroll Lock alternam. */
     var filterOn: Boolean
-        get() = sp.getBoolean("filterOn", true)
+        get() = sp.getBoolean("filterOn", false)
         set(v) { sp.edit().putBoolean("filterOn", v).apply() }
 
     /** true = transporte BLE (HOGP); false = Bluetooth clássico. */

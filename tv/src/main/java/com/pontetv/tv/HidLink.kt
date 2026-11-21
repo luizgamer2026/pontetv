@@ -138,6 +138,29 @@ object HidLink {
         startWorker()
     }
 
+    /**
+     * Estado do Bluetooth da TV para a tela (ligado, nome, celulares pareados com nome). Tudo isso são chamadas síncronas ao processo do
+     * Bluetooth, que pode estar ocupado com o envio: por isso é lido numa thread própria e a tela só usa a cópia.
+     */
+    @Volatile var snapEnabled = true
+    @Volatile var snapName = "—"
+    @Volatile var snapBonded: List<Pair<BluetoothDevice, String>> = emptyList()
+    private val snapExec = Executors.newSingleThreadExecutor()
+
+    /** Atualiza a cópia fora da thread principal; [changed] roda na principal só se algo mudou. */
+    fun refreshSnapshot(changed: () -> Unit) {
+        snapExec.execute {
+            try {
+                val en = btEnabled()
+                val nm = adapterName()
+                val bd = bonded().take(8).map { it to nameOf(it) }
+                val diff = en != snapEnabled || nm != snapName || bd.map { it.second } != snapBonded.map { it.second }
+                snapEnabled = en; snapName = nm; snapBonded = bd
+                if (diff) main.post(changed)
+            } catch (_: Throwable) {}
+        }
+    }
+
     fun adapterName(): String = try { adapter?.name ?: "—" } catch (e: SecurityException) { "—" }
     fun btEnabled(): Boolean = try { adapter?.isEnabled == true } catch (e: SecurityException) { false }
     fun hasAdapter(): Boolean = adapter != null

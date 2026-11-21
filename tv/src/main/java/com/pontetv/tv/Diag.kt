@@ -76,6 +76,7 @@ object Diag {
     private fun loop(g: Int) {
         var nextSample = 0L
         var stackAt = 0L
+        var released = false
         while (running && gen == g) {
             val now = SystemClock.uptimeMillis()
             val p = postedAt
@@ -88,6 +89,13 @@ object Diag {
                 stackAt = now
                 curStack = shortStack()
             }
+            if (p != 0L && now - p >= 1500L && !released) {
+                // a thread principal está parada há mais de 1,5 s: solta teclas e botões no celular para nada ficar preso (o jogo
+                // correndo sozinho). O envio é feito por esta thread, que não depende da principal.
+                released = true
+                HidLink.send(HidDescriptor.ID_KEYBOARD, ByteArray(HidDescriptor.KEYBOARD_SIZE))
+                HidLink.sendMouse(0, 0, 0, 0, 0)
+            } else if (p == 0L || now - p < 1500L) released = false
             if (now >= nextSample) { nextSample = now + 2000L; sample() }
             try { Thread.sleep(40) } catch (_: InterruptedException) {}
         }

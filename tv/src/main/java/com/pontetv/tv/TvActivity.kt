@@ -472,7 +472,7 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
     private fun updateStats() {
         val svc = KeyFilterService.instance
         val filt = when {
-            !Diag.filterEnabled -> "DESLIGADO por você (teclas F1…F12/Esc também agem na TV)"
+            !Diag.filterEnabled -> "DESLIGADO (F1…F12/Esc também agem na TV; ↑ ↓ liga)"
             svc == null -> "serviço de acessibilidade não está ligado (sem bloqueio)"
             KeyFilterService.filterOn -> "LIGADO"
             else -> "aguardando"
@@ -515,32 +515,39 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
             if (!HidLink.connected) release(false) else updateHud()
             return
         }
+        render()
+        // o estado do Bluetooth da TV é lido fora da thread principal; a tela se refaz só se algo mudou
+        HidLink.refreshSnapshot { if (!engaged) render() }
+    }
+
+    /** Desenha o painel (fora de jogo) com a cópia do estado do Bluetooth: nenhuma chamada ao Bluetooth aqui. */
+    private fun render() {
         val h = HidLink.host
         when {
             !HidLink.supported -> { statusText.text = HidLink.status; statusText.setTextColor(0xFFFF5A6A.toInt()) }
             !HidLink.hasAdapter() -> { statusText.text = "Esta TV não tem Bluetooth."; statusText.setTextColor(0xFFFF5A6A.toInt()) }
-            !HidLink.btEnabled() -> { statusText.text = "Bluetooth da TV desligado."; statusText.setTextColor(0xFFFFB020.toInt()) }
-            h != null -> { statusText.text = "✔ Conectado ao celular ${HidLink.nameOf(h)}"; statusText.setTextColor(0xFF22D3A6.toInt()) }
+            !HidLink.snapEnabled -> { statusText.text = "Bluetooth da TV desligado."; statusText.setTextColor(0xFFFFB020.toInt()) }
+            h != null -> { statusText.text = "✔ Conectado ao celular ${HidLink.hostName}"; statusText.setTextColor(0xFF22D3A6.toInt()) }
             else -> {
                 statusText.text = HidLink.status.ifEmpty { "Aguardando o celular…" }
                 statusText.setTextColor(0xFFFFB020.toInt())
             }
         }
-        btText.text = "Nome Bluetooth desta TV: ${HidLink.adapterName()}"
+        btText.text = "Nome Bluetooth desta TV: ${HidLink.snapName}"
         devText.text = "Teclado da TV: ${InputWatcher.kb?.let { "detectado ($it)" } ?: "não detectado"}\n" +
             "Mouse da TV: ${InputWatcher.mouse?.let { "detectado ($it)" } ?: "não detectado"}"
         a11yText.text = if (KeyFilterService.instance != null)
             "Bloqueio de teclas na TV: ligado (Esc, F1…F12 e Windows vão só para o celular)"
         else "Bloqueio de teclas na TV: desligado. Toque em \"Bloquear teclas na TV\" (abre as Configurações). Para ligar sozinho a cada vez que a TV ligar, use o ADB uma vez (toque 3x para ver o passo a passo)."
         btnMode.text = if (HidLink.bleMode) "Modo: BLE (toque para voltar ao clássico)" else "Modo: Bluetooth clássico (toque para testar BLE)"
-        btnEnable.visibility = if (HidLink.hasAdapter() && !HidLink.btEnabled()) View.VISIBLE else View.GONE
+        btnEnable.visibility = if (HidLink.hasAdapter() && !HidLink.snapEnabled) View.VISIBLE else View.GONE
         btnControl.visibility = if (HidLink.connected && !engaged) View.VISIBLE else View.GONE
 
         listBox.removeAllViews()
-        val bonded = HidLink.bonded()
+        val bonded = HidLink.snapBonded
         if (bonded.isEmpty()) listBox.addView(label("Nenhum aparelho pareado ainda.", 14f, 0xFF8FA0C8.toInt()))
-        for (d in bonded.take(8)) {
-            val b = tvButton("Conectar a ${HidLink.nameOf(d)}") { HidLink.connect(d) }
+        for ((d, nm) in bonded) {
+            val b = tvButton("Conectar a $nm") { HidLink.connect(d) }
             listBox.addView(b, LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(6) })
         }
 

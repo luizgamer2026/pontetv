@@ -3,6 +3,9 @@ package com.pontetv.tv
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.AccessibilityServiceInfo
 import android.content.Intent
+import android.os.Handler
+import android.os.HandlerThread
+import android.os.Looper
 import android.view.KeyEvent
 import android.view.accessibility.AccessibilityEvent
 
@@ -23,7 +26,16 @@ class KeyFilterService : AccessibilityService() {
         @Volatile var maxMs = 0
         @Volatile var calls = 0
         fun resetDiag() { maxMs = 0; calls = 0 }
+
+        // serviceInfo (ler/gravar) é chamada síncrona ao system_server: se ele estiver parado, quem chamou fica preso.
+        // Por isso o filtro é ligado/desligado numa thread própria, nunca na principal (que precisa atender F8/VOLTAR/F9).
+        private val ft = HandlerThread("PonteTV-Filter").apply { start() }
+        private val fh = Handler(ft.looper)
+        private val mainH = Handler(Looper.getMainLooper())
+        @Volatile private var wanted = false
     }
+
+    private val applyRun = Runnable { applyFilter(wanted) }
 
     override fun onServiceConnected() {
         super.onServiceConnected()
@@ -33,7 +45,12 @@ class KeyFilterService : AccessibilityService() {
 
     /** Liga/desliga o filtro do sistema. Só liga se o usuário não o desligou (Diag.filterEnabled: ↑/↓ do controle ou Scroll Lock). */
     fun setFilter(on: Boolean) {
-        val want = on && Diag.filterEnabled
+        wanted = on && Diag.filterEnabled
+        fh.removeCallbacks(applyRun)
+        fh.post(applyRun)
+    }
+
+    private fun applyFilter(want: Boolean) {
         try {
             val info = serviceInfo ?: return
             val flag = AccessibilityServiceInfo.FLAG_REQUEST_FILTER_KEY_EVENTS
@@ -74,7 +91,11 @@ class KeyFilterService : AccessibilityService() {
                     val cmd = HubCommands.forKey(event.keyCode)
                     if (cmd != 0) {
                         // teclas de comando (F8, F9/Insert, F10/Pause): o próprio serviço trata e consome, a TV nunca as vê
-                        if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) HubCommands.handler?.invoke(cmd)
+                        // adia para depois de responder ao sistema (ele só espera 500 ms pela resposta de cada tecla)
+                        if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
+                            val h = HubCommands.handler
+                            if (h != null) mainH.post { h(cmd) }
+                        }
                         true
                     } else { InputBridge.key(event); true }
                 }

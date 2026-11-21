@@ -46,6 +46,12 @@ chegar ao app**. Mudanças:
   (`isEnabled`, `name`, `bondedDevices`, `device.name`: chamadas síncronas ao outro processo) e refazia a lista de celulares com o painel escondido.
   Agora, com o controle ativo, nada disso roda; o nome do celular é lido uma vez, fora da thread principal. A varredura de dispositivos por
   "mudança" (Caps/Num Lock) também não roda mais durante o controle.
+* **Sair (F8/VOLTAR) e trocar o Hz não dependem mais do sistema responder:** ligar/desligar o filtro (`serviceInfo`) e ler o estado do
+  Bluetooth da TV (ligado, nome, pareados) eram chamadas síncronas na thread principal; se o `system_server` ou o Bluetooth da TV
+  estivessem parados, F8/VOLTAR/F9 ficavam presos junto (só o botão Home, que o sistema trata, saía). Agora essas chamadas rodam em threads
+  próprias e o painel usa uma cópia. Os comandos do serviço também são adiados para depois de ele responder ao sistema.
+* **Tecla presa:** se a thread principal ficar parada mais de 1,5 s, o app solta teclas e botões no celular por outra thread.
+* **O bloqueio de teclas vem DESLIGADO por padrão nesta versão de teste** (↑/↓ do controle ou Scroll Lock ligam).
 * **Prioridade da thread principal** sobe (como a de envio) enquanto o teclado/mouse controlam o celular.
 * **Chave do bloqueio de teclas (teste A/B):** com o filtro de acessibilidade ligado, *todo* evento de teclado e mouse (o mouse a até 1000 Hz)
   passa pela thread principal do `system_server` da TV antes de chegar ao app, e cada tecla espera a resposta do serviço (limite de 500 ms).
