@@ -20,10 +20,17 @@ object InputBridge {
 
     /** Diagnóstico: pior tempo entre o evento nascer (teclado/mouse USB) e o app da TV processá-lo. Alto = a TV está sobrecarregada. */
     @Volatile var deliveryMaxMs = 0
-    fun resetDiag() { deliveryMaxMs = 0 }
-    private fun noteDelivery(eventTime: Long) {
-        val d = (SystemClock.uptimeMillis() - eventTime).toInt()
-        if (d > deliveryMaxMs) deliveryMaxMs = d
+    @Volatile var deliveryMaxAt = 0L
+    @Volatile var deliveryMaxKind = ""
+    /** Quantas entregas demoraram 200 ms ou mais (e quando foi a última). */
+    @Volatile var spikes = 0
+    @Volatile var lastSpikeAt = 0L
+    fun resetDiag() { deliveryMaxMs = 0; deliveryMaxAt = 0L; deliveryMaxKind = ""; spikes = 0; lastSpikeAt = 0L }
+    private fun noteDelivery(eventTime: Long, kind: String) {
+        val now = SystemClock.uptimeMillis()
+        val d = (now - eventTime).toInt()
+        if (d >= 200) { spikes++; lastSpikeAt = now }
+        if (d > deliveryMaxMs) { deliveryMaxMs = d; deliveryMaxAt = now; deliveryMaxKind = kind }
     }
 
     /** A tecla deste evento está apertada agora? (um "soltar" que chega sem o dispositivo — USB que sumiu — precisa ser aceito.) */
@@ -41,7 +48,7 @@ object InputBridge {
 
     // ---------------- teclado ----------------
     fun key(e: KeyEvent) {
-        noteDelivery(e.eventTime)
+        noteDelivery(e.eventTime, "tecla")
         if (e.action != KeyEvent.ACTION_DOWN && e.action != KeyEvent.ACTION_UP) return
         val down = e.action == KeyEvent.ACTION_DOWN
         if (down && e.repeatCount > 0) return // quem repete a tecla é o celular
@@ -68,7 +75,7 @@ object InputBridge {
     // ---------------- mouse ----------------
     /** Ponteiro capturado: o Android entrega só deslocamentos relativos (o cursor some da TV). */
     fun captured(e: MotionEvent) {
-        noteDelivery(e.eventTime)
+        noteDelivery(e.eventTime, "mouse")
         when (e.actionMasked) {
             MotionEvent.ACTION_MOVE, MotionEvent.ACTION_HOVER_MOVE -> {
                 var dx = e.x

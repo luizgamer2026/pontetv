@@ -12,6 +12,7 @@ import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.Bundle
+import android.os.Process
 import android.os.SystemClock
 import android.os.Handler
 import android.os.Looper
@@ -58,6 +59,8 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
     private var lastPauseAt = 0L
     private var lastPauseMs = 0
     private var pausedAt = 0L
+    private var origPrio = Int.MIN_VALUE
+    private val prefs by lazy { TvPrefs(this) }
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
@@ -67,6 +70,7 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
     override fun onCreate(b: Bundle?) {
         super.onCreate(b)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        Diag.filterEnabled = prefs.filterOn
         HidLink.init(this)
         build()
         InputWatcher.start(this)
@@ -385,6 +389,8 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
         if (engaged || !HidLink.connected) return
         engaged = true
         InputBridge.capturing = true
+        boostMain()
+        Diag.start(this)
         KeyFilterService.instance?.setFilter(true)
         panel.visibility = View.GONE
         hud.visibility = View.VISIBLE
@@ -406,6 +412,24 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
         }
     }
 
+    /**
+     * Enquanto controla o celular, a thread principal é a que recebe o teclado/mouse da TV: sobe a prioridade dela
+     * (como já é feito na thread de envio) para outro processo da TV não atrasar a entrega. A principal tem o mesmo número do processo.
+     */
+    private fun boostMain() {
+        try {
+            val tid = Process.myPid()
+            if (origPrio == Int.MIN_VALUE) origPrio = Process.getThreadPriority(tid)
+            Process.setThreadPriority(tid, Process.THREAD_PRIORITY_URGENT_DISPLAY)
+        } catch (_: Throwable) {}
+    }
+
+    private fun unboostMain() {
+        try {
+            if (origPrio != Int.MIN_VALUE) { Process.setThreadPriority(Process.myPid(), origPrio); origPrio = Int.MIN_VALUE }
+        } catch (_: Throwable) {}
+    }
+
     /** A cada segundo atualiza o HUD com o diagnóstico do envio Bluetooth. */
     private val hudTick = object : Runnable {
         override fun run() {
@@ -420,6 +444,8 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
         engaged = false
         InputBridge.capturing = false
         KeyFilterService.instance?.setFilter(false)
+        Diag.stop()
+        unboostMain()
         main.removeCallbacks(hudTick)
         if (byUser) manualOff = true
         InputBridge.releaseAll()
@@ -435,7 +461,7 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
         val h = HidLink.host
         hudTitle.text = "Teclado e mouse conectados ao celular"
         val soft = engaged && !root.hasPointerCapture()
-        hudSub.text = "${h?.let { HidLink.nameOf(it) } ?: ""}\n\n" +
+        hudSub.text = "${if (h != null) HidLink.hostName else ""}\n\n" +
             "Teclado da TV: ${InputWatcher.kb ?: "não detectado"}\nMouse da TV: ${InputWatcher.mouse ?: "não detectado"}" +
             (if (soft) "\n(modo alternativo de mouse: esta TV não liberou a captura)" else "") +
             "\n\nF8 solta o teclado e o mouse para usar na TV (ou VOLTAR do controle remoto)"
@@ -444,10 +470,28 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
 
     /** Só este TextView muda a cada 2 s (pouco trabalho de layout na thread que recebe o mouse). */
     private fun updateStats() {
+        val svc = KeyFilterService.instance
+        val filt = when {
+            !Diag.filterEnabled -> "DESLIGADO por você (teclas F1…F12/Esc também agem na TV)"
+            svc == null -> "serviço de acessibilidade não está ligado (sem bloqueio)"
+            KeyFilterService.filterOn -> "LIGADO"
+            else -> "aguardando"
+        }
+        val stack = Diag.worstStack.let { if (it.length > 190) it.take(190) + "…" else it }
         val t = "Bluetooth: ${HidLink.statRate} envios/s · envio mais lento ${HidLink.statWorstMs} ms\n" +
             "Travadas — fila: ${HidLink.statLagMax} ms · envio: ${HidLink.statStallMax} ms · quedas do link: ${HidLink.linkDrops} · " +
             "foco perdido: ${focusLost}x${if (focusLost > 0) " (última ${focusLastMs} ms)" else ""}\n" +
-            "Na TV — entrega das teclas/mouse (pior): ${InputBridge.deliveryMaxMs} ms · USB removido/religado: ${InputWatcher.removals}x\n" +
+            "Na TV — entrega das teclas/mouse (pior): ${InputBridge.deliveryMaxMs} ms" +
+            (if (InputBridge.deliveryMaxAt != 0L) " (${InputBridge.deliveryMaxKind}, ${ago(InputBridge.deliveryMaxAt)})" else "") +
+            " · demoras ≥200 ms: ${InputBridge.spikes}x${if (InputBridge.spikes > 0) " (última ${ago(InputBridge.lastSpikeAt)})" else ""}" +
+            " · USB removido/religado: ${InputWatcher.removals}x\n" +
+            "App na TV — thread principal parada (pior): ${Diag.mainLagMax} ms" +
+            (if (Diag.mainLagMaxAt != 0L) " (${ago(Diag.mainLagMaxAt)})" else "") +
+            " · paradas ≥250 ms: ${Diag.mainStalls}x" +
+            (if (stack.isNotEmpty()) "\n   onde ficou presa: $stack" else "") + "\n" +
+            "TV — RAM livre: ${if (Diag.availMb >= 0) "${Diag.availMb} MB" else "?"} · pouca memória: ${if (Diag.lowMemory) "SIM" else "não"}" +
+            " (avisos do sistema: ${Diag.trimCount}x) · GC que bloqueou o app: ${Diag.gcBlockMs} ms (${Diag.gcBlockCount}x)\n" +
+            "Bloqueio de teclas: $filt · resposta do serviço: até ${KeyFilterService.maxMs} ms em ${KeyFilterService.calls} teclas (↑ ↓ no controle ou Scroll Lock alterna)\n" +
             "Há quanto tempo — envio travado: ${ago(HidLink.lastStallAt)}${if (HidLink.lastStallAt != 0L) " (${HidLink.lastStallMs} ms)" else ""}" +
             " · queda do link: ${ago(HidLink.lastDropAt)} · USB mexeu: ${ago(InputWatcher.lastChangeAt)} · foco: ${ago(lastFocusAt)}\n" +
             "App saiu da frente (menu/aviso da TV): ${pauses}x${if (pauses > 0) " (última ${ago(lastPauseAt)}, ficou ${lastPauseMs} ms fora)" else ""}" +
@@ -465,6 +509,12 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
 
     private fun update() {
         if (!::statusText.isInitialized) return
+        if (engaged) {
+            // jogando: o painel está escondido. Nada de perguntar ao Bluetooth da TV (chamadas ao outro processo que podem
+            // demorar) nem de refazer a lista de celulares: a thread principal fica livre para receber teclado e mouse.
+            if (!HidLink.connected) release(false) else updateHud()
+            return
+        }
         val h = HidLink.host
         when {
             !HidLink.supported -> { statusText.text = HidLink.status; statusText.setTextColor(0xFFFF5A6A.toInt()) }
@@ -520,6 +570,8 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
             engaged = false
             InputBridge.capturing = false
             KeyFilterService.instance?.setFilter(false)
+            Diag.stop()
+            unboostMain()
             main.removeCallbacks(hudTick)
             InputBridge.releaseAll()
             if (root.hasPointerCapture()) root.releasePointerCapture()
@@ -533,9 +585,15 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
         super.onPause()
     }
 
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        Diag.trimCount++
+        Diag.trimLevel = level
+    }
+
     private fun ago(t: Long): String = if (t == 0L) "nunca" else "${(SystemClock.uptimeMillis() - t) / 1000}s atrás"
 
-    private fun resetDiag() { HidLink.resetStats(); InputBridge.resetDiag(); InputWatcher.removals = 0; InputWatcher.lastChangeAt = 0L; focusLost = 0; focusLastMs = 0; lastFocusAt = 0L; pauses = 0; lastPauseAt = 0L; lastPauseMs = 0 }
+    private fun resetDiag() { HidLink.resetStats(); InputBridge.resetDiag(); InputWatcher.removals = 0; InputWatcher.lastChangeAt = 0L; focusLost = 0; focusLastMs = 0; lastFocusAt = 0L; pauses = 0; lastPauseAt = 0L; lastPauseMs = 0; Diag.reset(); KeyFilterService.resetDiag() }
 
     /** Se o mouse perdeu a captura (janela da TV por cima, etc.), pega de volta assim que der. */
     override fun onPointerCaptureChanged(hasCapture: Boolean) {
@@ -573,6 +631,12 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
                 if (engaged) release(true) else if (HidLink.connected) { manualOff = false; resetDiag(); engage() }
             HubCommands.RATE -> { HidLink.cycleRate(); if (engaged) updateHud() }
             HubCommands.KEEPALIVE -> { HidLink.toggleKeepAlive(); if (engaged) updateHud() }
+            HubCommands.FILTER -> {
+                Diag.filterEnabled = !Diag.filterEnabled
+                prefs.filterOn = Diag.filterEnabled
+                KeyFilterService.instance?.setFilter(engaged)
+                if (engaged) updateHud()
+            }
         }
     }
 
@@ -590,6 +654,8 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
                 // controle remoto: ← → trocam o ritmo do mouse, OK liga/desliga o keepalive
                 KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT -> { if (down) handleCommand(HubCommands.RATE); return true }
                 KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> { if (down) handleCommand(HubCommands.KEEPALIVE); return true }
+                // controle remoto: ↑ ↓ ligam/desligam o bloqueio de teclas do sistema (teste de travadas)
+                KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN -> { if (down) handleCommand(HubCommands.FILTER); return true }
                 KeyEvent.KEYCODE_BACK -> {
                     // o botão direito do mouse também vira VOLTAR no Android: só o controle remoto solta
                     val fromMouse = ((e.device?.sources ?: 0) and InputDevice.SOURCE_MOUSE) == InputDevice.SOURCE_MOUSE

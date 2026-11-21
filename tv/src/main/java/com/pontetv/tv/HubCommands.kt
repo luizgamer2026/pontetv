@@ -7,6 +7,7 @@ object HubCommands {
     const val RELEASE_TOGGLE = 1 // soltar / voltar a controlar o celular
     const val RATE = 2           // troca o ritmo máximo do mouse
     const val KEEPALIVE = 3      // liga/desliga o keepalive
+    const val FILTER = 4         // liga/desliga o bloqueio de teclas do sistema (filtro de acessibilidade)
 
     /** Quem executa os comandos (a tela da TV registra aqui). Também é chamado pelo serviço de bloqueio. */
     @Volatile var handler: ((Int) -> Unit)? = null
@@ -19,6 +20,7 @@ object HubCommands {
         KeyEvent.KEYCODE_F8 -> RELEASE_TOGGLE
         KeyEvent.KEYCODE_F9, KeyEvent.KEYCODE_INSERT -> RATE
         KeyEvent.KEYCODE_F10, KeyEvent.KEYCODE_BREAK -> KEEPALIVE
+        KeyEvent.KEYCODE_SCROLL_LOCK -> FILTER
         else -> 0
     }
 }

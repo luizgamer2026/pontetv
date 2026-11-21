@@ -36,6 +36,31 @@ Módulos: `phone` (Android 10+, pareia e mostra "Teclado e mouse conectados") ·
 * A imagem do celular na TV não faz parte do app (use o espelhamento nativo/cabo, se quiser).
 * Velocidade do mouse: configuração de ponteiro do próprio celular.
 
+## v2.11: teclado/mouse "morrendo" no meio do jogo
+
+Leitura da HUD de teste (Bluetooth saudável: envio mais lento 2 ms, fila 13 ms, 0 quedas do link, 0 foco perdido, 0 USB removido;
+**mas entrega das teclas/mouse na TV de até 1637 ms**): o atraso não está no Bluetooth nem no USB, está **dentro da TV, antes de o evento
+chegar ao app**. Mudanças:
+
+* **Thread principal livre enquanto controla:** `update()` (disparado por todo evento de Bluetooth/USB) chamava o Bluetooth da TV
+  (`isEnabled`, `name`, `bondedDevices`, `device.name`: chamadas síncronas ao outro processo) e refazia a lista de celulares com o painel escondido.
+  Agora, com o controle ativo, nada disso roda; o nome do celular é lido uma vez, fora da thread principal. A varredura de dispositivos por
+  "mudança" (Caps/Num Lock) também não roda mais durante o controle.
+* **Prioridade da thread principal** sobe (como a de envio) enquanto o teclado/mouse controlam o celular.
+* **Chave do bloqueio de teclas (teste A/B):** com o filtro de acessibilidade ligado, *todo* evento de teclado e mouse (o mouse a até 1000 Hz)
+  passa pela thread principal do `system_server` da TV antes de chegar ao app, e cada tecla espera a resposta do serviço (limite de 500 ms).
+  Numa TV de ~900 MB de RAM isso pode travar teclado e mouse juntos. **↑ / ↓ do controle remoto ou Scroll Lock** ligam/desligam o filtro ao vivo
+  (a escolha fica salva). O HUD mostra `Bloqueio de teclas: LIGADO/DESLIGADO`.
+* **HUD novo para achar a causa na próxima foto:**
+  * `Na TV — entrega (pior): X ms (tecla|mouse, há Ns) · demoras ≥200 ms: N (última há Ns)`: agora diz *quando* e *de quem* foi a demora.
+  * `App na TV — thread principal parada (pior): X ms · paradas ≥250 ms: N` + `onde ficou presa:` (pilha da thread principal no momento da parada).
+    Pilha com chamada ao Bluetooth/binder = o app estava preso numa chamada; pilha ociosa (`nativePollOnce`) com atraso = a **TV inteira** parou.
+  * `TV — RAM livre · pouca memória · GC que bloqueou o app`.
+  * `Bloqueio de teclas: … · resposta do serviço: até X ms em N teclas`.
+
+**Como testar:** jogue até travar, tire a foto da HUD. Depois repita com o bloqueio **DESLIGADO** (↓ no controle). Se com ele desligado não travar mais,
+o filtro é a causa e a gente troca o jeito de bloquear as teclas da TV.
+
 ## v2.10: auditoria do HID
 
 * **Thread de envio à prova de erro:** qualquer exceção inesperada no laço de envio agora é registrada (`erro:` no HUD) em vez de matar a thread

@@ -33,6 +33,8 @@ object HidLink {
     @Volatile var supported = true
     @Volatile var registered = false
     @Volatile var host: BluetoothDevice? = null
+    /** Nome do celular conectado, lido uma vez fora da thread principal (nameOf é uma chamada ao processo do Bluetooth). */
+    @Volatile var hostName = ""
     @Volatile var status = ""
     /** true = teclado/mouse por BLE (HOGP, BleHid); false = Bluetooth clássico (perfil HID Device). */
     @Volatile var bleMode = false
@@ -236,6 +238,7 @@ object HidLink {
         override fun onConnectionStateChanged(device: BluetoothDevice?, state: Int) {
             when (state) {
                 BluetoothProfile.STATE_CONNECTED -> {
+                    hostName = device?.let { nameOf(it) } ?: ""
                     host = device
                     device?.let { prefs?.lastHost = it.address }
                     status = "Conectado."
@@ -305,7 +308,7 @@ object HidLink {
     fun bleConnection(d: BluetoothDevice?, ready: Boolean) {
         if (!bleMode) return
         when {
-            d != null && ready -> { host = d; status = "Conectado (BLE)." }
+            d != null && ready -> { hostName = nameOf(d); host = d; status = "Conectado (BLE)." }
             d != null -> status = "BLE: celular conectando…"
             else -> { if (host != null) { linkDrops++; lastDropAt = SystemClock.uptimeMillis() }; host = null; clearQueue(); status = "BLE: aguardando o celular." }
         }
@@ -348,7 +351,7 @@ object HidLink {
         if (host != null) return
         try {
             val cur = h.connectedDevices.firstOrNull()
-            if (cur != null) { host = cur; notifyState(); return }
+            if (cur != null) { hostName = nameOf(cur); host = cur; notifyState(); return }
         } catch (_: Exception) {}
         val last = prefs?.lastHost ?: return
         bonded().firstOrNull { it.address == last }?.let { connect(it) }

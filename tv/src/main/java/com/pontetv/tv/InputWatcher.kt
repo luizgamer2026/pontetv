@@ -65,5 +65,6 @@ object InputWatcher : InputManager.InputDeviceListener {
         InputBridge.releaseAll()
         scan()
     }
-    override fun onInputDeviceChanged(deviceId: Int) { scan() }
+    // trocar LED (Caps/Num Lock) dispara isto: durante o controle não há nada novo para mostrar, e a varredura pesa na thread principal
+    override fun onInputDeviceChanged(deviceId: Int) { if (!InputBridge.capturing) scan() }
 }

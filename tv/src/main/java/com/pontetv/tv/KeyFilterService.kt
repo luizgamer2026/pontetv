@@ -17,6 +17,12 @@ import android.view.accessibility.AccessibilityEvent
 class KeyFilterService : AccessibilityService() {
     companion object {
         @Volatile var instance: KeyFilterService? = null
+        /** true = o filtro de teclas do sistema está de fato ligado agora (diagnóstico do HUD). */
+        @Volatile var filterOn = false
+        /** Quanto o pior onKeyEvent demorou para responder ao sistema (o sistema só espera 500 ms por tecla) e quantas teclas passaram por aqui. */
+        @Volatile var maxMs = 0
+        @Volatile var calls = 0
+        fun resetDiag() { maxMs = 0; calls = 0 }
     }
 
     override fun onServiceConnected() {
@@ -25,13 +31,16 @@ class KeyFilterService : AccessibilityService() {
         setFilter(InputBridge.capturing)
     }
 
+    /** Liga/desliga o filtro do sistema. Só liga se o usuário não o desligou (Diag.filterEnabled: ↑/↓ do controle ou Scroll Lock). */
     fun setFilter(on: Boolean) {
+        val want = on && Diag.filterEnabled
         try {
             val info = serviceInfo ?: return
             val flag = AccessibilityServiceInfo.FLAG_REQUEST_FILTER_KEY_EVENTS
-            if (((info.flags and flag) != 0) == on) return
-            info.flags = if (on) info.flags or flag else info.flags and flag.inv()
+            if (((info.flags and flag) != 0) == want) { filterOn = want; return }
+            info.flags = if (want) info.flags or flag else info.flags and flag.inv()
             serviceInfo = info
+            filterOn = want
         } catch (_: Throwable) {}
     }
 
@@ -41,13 +50,23 @@ class KeyFilterService : AccessibilityService() {
 
     override fun onUnbind(intent: Intent?): Boolean {
         instance = null
+        filterOn = false
         return super.onUnbind(intent)
     }
 
     override fun onKeyEvent(event: KeyEvent): Boolean {
+        val t0 = System.nanoTime()
+        val r = handle(event)
+        val ms = ((System.nanoTime() - t0) / 1_000_000L).toInt()
+        calls++
+        if (ms > maxMs) maxMs = ms
+        return r
+    }
+
+    private fun handle(event: KeyEvent): Boolean {
         return try {
             when {
-                !InputBridge.capturing || !HidLink.connected -> false
+                !Diag.filterEnabled || !InputBridge.capturing || !HidLink.connected -> false
                 !InputBridge.isKeyboard(event) ->
                     // "soltar" sem dispositivo (USB que sumiu) de uma tecla que está apertada: aceita, senão ela fica presa
                     if (event.action == KeyEvent.ACTION_UP && InputBridge.isHeld(event)) { InputBridge.key(event); true } else false
