@@ -21,6 +21,10 @@ import android.os.SystemClock
 object Diag {
     /** Bloqueio de teclas do sistema (filtro de acessibilidade) ligado pelo usuário. ↑/↓ do controle ou Scroll Lock alternam. */
     @Volatile var filterEnabled = true
+    /** O app desligou o filtro sozinho porque a TV atrasou a entrega das teclas (volta a tentar quando o teclado é pego de novo). */
+    @Volatile var autoOff = false
+    @Volatile var autoOffMs = 0
+    @Volatile var autoOffAt = 0L
 
     @Volatile var mainLagMax = 0
     @Volatile var mainLagMaxAt = 0L

@@ -26,8 +26,6 @@ object InputWatcher : InputManager.InputDeviceListener {
     @Volatile var present = ""
     /** Avisa a tela quando um dispositivo real entra/sai (para o mouse ser recapturado depois de um soluço do USB). */
     @Volatile var onTopology: (() -> Unit)? = null
-    /** Até este instante, entradas/saídas de dispositivo são esperadas (o modo USB direto pega/devolve o teclado): não contam como soluço do USB. */
-    @Volatile var quietUntil = 0L
 
     private val known = HashMap<Int, String>()   // id -> "nome vid:pid" dos reais, para nomear quem sumiu (depois de sumir não dá mais para perguntar)
     private val virt = HashSet<Int>()
@@ -90,17 +88,16 @@ object InputWatcher : InputManager.InputDeviceListener {
         if (d != null && d.isVirtual) virt.add(deviceId)
         else if (d != null) {
             known[deviceId] = tag(d)
-            if (SystemClock.uptimeMillis() >= quietUntil) { note("+", tag(d)); onTopology?.invoke() }
+            note("+", tag(d)); onTopology?.invoke()
         }
         scan()
     }
     override fun onInputDeviceRemoved(deviceId: Int) {
         if (virt.remove(deviceId)) { scan(); return }   // dispositivo virtual do sistema: não é USB soltando
-        val expected = SystemClock.uptimeMillis() < quietUntil
-        if (!expected) removals++
+        removals++
         lastChangeAt = SystemClock.uptimeMillis()
         val nm = known.remove(deviceId) ?: ("dispositivo #" + deviceId)
-        if (!expected) { note("−", nm); onTopology?.invoke() }
+        note("−", nm); onTopology?.invoke()
         seenMouse = null
         // o teclado USB sumiu (cabo, hub, energia): nenhuma tecla pode ficar presa no celular
         InputBridge.releaseAll()

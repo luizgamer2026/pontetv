@@ -36,6 +36,20 @@ Módulos: `phone` (Android 10+, pareia e mostra "Teclado e mouse conectados") ·
 * A imagem do celular na TV não faz parte do app (use o espelhamento nativo/cabo, se quiser).
 * Velocidade do mouse: configuração de ponteiro do próprio celular.
 
+## v2.14: bloqueio inteligente (e o USB direto sai)
+
+**USB direto removido.** Na HUD, `USB visto pelo app` listou só um pendrive e o chip de Wi-Fi/Bluetooth da TV: o teclado (1a2c:6004) e o mouse não aparecem na API USB.
+O Android esconde teclado/mouse HID dos apps de propósito, então o app nunca consegue pegá-los por USB. As teclas F1…F4 etc. agem na TV porque o sistema as intercepta antes
+de o app recebê-las (o `HidKeys` já converte F1…F12); o único jeito de um app pegá-las antes é o filtro de teclas de acessibilidade.
+
+**O filtro agora é "inteligente":**
+* o serviço recebe as teclas numa **thread própria** (de prioridade alta, via `getMainLooper()`), e não na thread principal que também recebe o mouse e desenha a tela;
+* se a TV demorar para chamar o serviço (**>= 1 s, ou duas vezes >= 300 ms em 5 s**), o filtro se **desliga sozinho** e as teclas seguem o caminho normal do Android: o teclado não morre
+  (no pior caso engasga uma vez). A cada vez que o teclado é pego de novo (soltar com F8 e pegar), o bloqueio tenta outra vez;
+* `InputBridge` ficou sincronizado (o serviço e a tela mexem no estado das teclas de threads diferentes);
+* o bloqueio vem **ligado** por padrão de novo (preferência nova `filterOn2`);
+* HUD: `chegada ao serviço (pior): X ms` (da tecla nascer até o sistema chamar o serviço) separa "o sistema demora" de "o app demora", e aparece `DESLIGADO SOZINHO: a TV atrasou X ms`.
+
 ## v2.13: o USB direto não achava o teclado
 
 Na HUD de teste: `Teclado USB direto: ligado, mas procurando teclado USB…` (a permissão não era o problema: se fosse, diria "aguardando você aceitar o acesso USB").

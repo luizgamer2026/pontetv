@@ -39,7 +39,7 @@ object InputBridge {
     }
 
     /** Teclas apertadas segundo o estado interno do app (o que ele manda ao celular agora). Só na thread principal. */
-    fun heldText(): String {
+    @Synchronized fun heldText(): String {
         val sb = StringBuilder()
         val m = arrayOf("Ctrl", "Shift", "Alt", "Meta", "CtrlD", "ShiftD", "AltD", "MetaD")
         for (i in 0..7) if ((mods and (1 shl i)) != 0) sb.append(m[i]).append(' ')
@@ -54,7 +54,7 @@ object InputBridge {
     }
 
     /** A tecla deste evento está apertada agora? (um "soltar" que chega sem o dispositivo — USB que sumiu — precisa ser aceito.) */
-    fun isHeld(e: KeyEvent): Boolean {
+    @Synchronized fun isHeld(e: KeyEvent): Boolean {
         val u = HidKeys.usage(e)
         if (u == 0) return false
         return if (u in 0xE0..0xE7) (mods and (1 shl (u - 0xE0))) != 0 else keys.contains(u)
@@ -67,7 +67,7 @@ object InputBridge {
     }
 
     // ---------------- teclado ----------------
-    fun key(e: KeyEvent) {
+    @Synchronized fun key(e: KeyEvent) {
         noteDelivery(e.eventTime, "tecla")
         if (e.action != KeyEvent.ACTION_DOWN && e.action != KeyEvent.ACTION_UP) return
         val down = e.action == KeyEvent.ACTION_DOWN
@@ -103,7 +103,7 @@ object InputBridge {
 
     // ---------------- mouse ----------------
     /** Ponteiro capturado: o Android entrega só deslocamentos relativos (o cursor some da TV). */
-    fun captured(e: MotionEvent) {
+    @Synchronized fun captured(e: MotionEvent) {
         noteDelivery(e.eventTime, "mouse")
         when (e.actionMasked) {
             MotionEvent.ACTION_MOVE, MotionEvent.ACTION_HOVER_MOVE -> {
@@ -123,7 +123,7 @@ object InputBridge {
     }
 
     /** Para TVs que não liberam a captura: usa os eixos relativos que o Android informa em todo evento de mouse. */
-    fun softRelative(e: MotionEvent) {
+    @Synchronized fun softRelative(e: MotionEvent) {
         when (e.actionMasked) {
             MotionEvent.ACTION_HOVER_MOVE, MotionEvent.ACTION_MOVE -> {
                 for (i in 0 until e.historySize) {
@@ -171,7 +171,7 @@ object InputBridge {
     }
 
     /** Solta todas as teclas e botões no celular (ao parar de controlar, trocar de app ou desconectar). */
-    fun releaseAll() {
+    @Synchronized fun releaseAll() {
         keys.clear(); mods = 0; buttons = 0
         accX = 0f; accY = 0f; accV = 0f; accH = 0f
         sendKeys()

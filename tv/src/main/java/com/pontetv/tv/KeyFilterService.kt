@@ -6,6 +6,8 @@ import android.content.Intent
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
+import android.os.Process
+import android.os.SystemClock
 import android.view.KeyEvent
 import android.view.accessibility.AccessibilityEvent
 
@@ -25,7 +27,15 @@ class KeyFilterService : AccessibilityService() {
         /** Quanto o pior onKeyEvent demorou para responder ao sistema (o sistema só espera 500 ms por tecla) e quantas teclas passaram por aqui. */
         @Volatile var maxMs = 0
         @Volatile var calls = 0
-        fun resetDiag() { maxMs = 0; calls = 0 }
+        /** Pior tempo entre a tecla nascer no USB e o sistema chamar o serviço (inclui a espera na fila do sistema). */
+        @Volatile var entryMaxMs = 0
+        @Volatile var entryMaxAt = 0L
+        fun resetDiag() { maxMs = 0; calls = 0; entryMaxMs = 0; entryMaxAt = 0L }
+
+        // O sistema chama onKeyEvent numa thread do app e espera a resposta (no máximo 500 ms por tecla). Por padrão é a thread principal,
+        // que também recebe todo o mouse e desenha a tela. Aqui o serviço ganha uma thread só dele, de prioridade alta.
+        private val cbThread = HandlerThread("PonteTV-Key", Process.THREAD_PRIORITY_URGENT_DISPLAY).apply { start() }
+        private var slowAt = 0L
 
         // serviceInfo (ler/gravar) é chamada síncrona ao system_server: se ele estiver parado, quem chamou fica preso.
         // Por isso o filtro é ligado/desligado numa thread própria, nunca na principal (que precisa atender F8/VOLTAR/F9).
@@ -37,6 +47,9 @@ class KeyFilterService : AccessibilityService() {
 
     private val applyRun = Runnable { applyFilter(wanted) }
 
+    /** AccessibilityService usa este Looper para entregar onKeyEvent: devolve o da thread própria em vez da principal. */
+    override fun getMainLooper(): Looper = cbThread.looper
+
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
@@ -45,7 +58,7 @@ class KeyFilterService : AccessibilityService() {
 
     /** Liga/desliga o filtro do sistema. Só liga se o usuário não o desligou (Diag.filterEnabled: ↑/↓ do controle ou Scroll Lock). */
     fun setFilter(on: Boolean) {
-        wanted = on && Diag.filterEnabled
+        wanted = on && Diag.filterEnabled && !Diag.autoOff
         fh.removeCallbacks(applyRun)
         fh.post(applyRun)
     }
@@ -71,8 +84,26 @@ class KeyFilterService : AccessibilityService() {
         return super.onUnbind(intent)
     }
 
+    /**
+     * "Bloqueio inteligente": se a TV demorar para entregar as teclas ao serviço (>= 1 s, ou duas vezes >= 300 ms em 5 s), o filtro
+     * é desligado na hora e as teclas passam a seguir o caminho normal do Android, em vez de o teclado "morrer".
+     */
+    private fun watch(lat: Int, now: Long) {
+        if (lat < 300 || Diag.autoOff) return
+        if (lat >= 1000 || now - slowAt < 5000L) {
+            Diag.autoOffMs = lat; Diag.autoOffAt = now; Diag.autoOff = true
+            setFilter(false)
+        } else slowAt = now
+    }
+
     override fun onKeyEvent(event: KeyEvent): Boolean {
         val t0 = System.nanoTime()
+        val now = SystemClock.uptimeMillis()
+        val lat = (now - event.eventTime).toInt()
+        if (filterOn) {
+            if (lat > entryMaxMs) { entryMaxMs = lat; entryMaxAt = now }
+            watch(lat, now)
+        }
         val r = handle(event)
         val ms = ((System.nanoTime() - t0) / 1_000_000L).toInt()
         calls++
@@ -83,7 +114,7 @@ class KeyFilterService : AccessibilityService() {
     private fun handle(event: KeyEvent): Boolean {
         return try {
             when {
-                !Diag.filterEnabled || !InputBridge.capturing || !HidLink.connected -> false
+                !Diag.filterEnabled || Diag.autoOff || !InputBridge.capturing || !HidLink.connected -> false
                 !InputBridge.isKeyboard(event) ->
                     // "soltar" sem dispositivo (USB que sumiu) de uma tecla que está apertada: aceita, senão ela fica presa
                     if (event.action == KeyEvent.ACTION_UP && InputBridge.isHeld(event)) { InputBridge.key(event); true } else false

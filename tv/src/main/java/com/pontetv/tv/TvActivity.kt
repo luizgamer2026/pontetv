@@ -47,7 +47,6 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
     private lateinit var listBox: LinearLayout
     private lateinit var btnControl: TextView
     private lateinit var btnEnable: TextView
-    private lateinit var btnUsb: TextView
     private lateinit var btnMode: TextView
     private lateinit var a11yText: TextView
     private var engaged = false
@@ -72,8 +71,6 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
         super.onCreate(b)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         Diag.filterEnabled = prefs.filterOn
-        UsbDirect.enabled = prefs.usbDirect
-        UsbDirect.init(this)
         HidLink.init(this)
         build()
         InputWatcher.onTopology = { scheduleRecapture() }
@@ -174,9 +171,7 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
         col.addView(btns, LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(18) })
         val btns2 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         btnMode = tvButton("Modo: Bluetooth clássico") { toggleMode() }
-        btnUsb = tvButton("Teclado: USB direto") { handleCommand(HubCommands.USB) }
         btns2.addView(btnMode)
-        btns2.addView(btnUsb, LinearLayout.LayoutParams(-2, -2).apply { leftMargin = dp(12) })
         col.addView(btns2, LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(12) })
         visible.requestFocus()
 
@@ -397,7 +392,7 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
         InputBridge.capturing = true
         boostMain()
         Diag.start(this)
-        UsbDirect.start()
+        Diag.autoOff = false   // a cada vez que o teclado é pego, o bloqueio tenta de novo
         KeyFilterService.instance?.setFilter(true)
         panel.visibility = View.GONE
         hud.visibility = View.VISIBLE
@@ -451,7 +446,6 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
         engaged = false
         InputBridge.capturing = false
         KeyFilterService.instance?.setFilter(false)
-        UsbDirect.stop()
         Diag.stop()
         unboostMain()
         main.removeCallbacks(hudTick)
@@ -470,7 +464,7 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
         hudTitle.text = "Teclado e mouse conectados ao celular"
         val soft = engaged && !root.hasPointerCapture()
         hudSub.text = "${if (h != null) HidLink.hostName else ""}\n\n" +
-            "Teclado da TV: ${if (UsbDirect.active) "lido direto pelo USB" else (InputWatcher.kb ?: "não detectado")}\nMouse da TV: ${InputWatcher.mouse ?: "não detectado"}" +
+            "Teclado da TV: ${InputWatcher.kb ?: "não detectado"}\nMouse da TV: ${InputWatcher.mouse ?: "não detectado"}" +
             (if (soft) "\n(modo alternativo de mouse: esta TV não liberou a captura)" else "") +
             "\n\nF8 solta o teclado e o mouse para usar na TV (ou VOLTAR do controle remoto)"
         updateStats()
@@ -481,6 +475,7 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
         val svc = KeyFilterService.instance
         val filt = when {
             !Diag.filterEnabled -> "DESLIGADO (F1…F12/Esc também agem na TV; ↑ ↓ liga)"
+            Diag.autoOff -> "DESLIGADO SOZINHO: a TV atrasou ${Diag.autoOffMs} ms (${ago(Diag.autoOffAt)}); tenta de novo ao soltar (F8) e pegar"
             svc == null -> "serviço de acessibilidade não está ligado (sem bloqueio)"
             KeyFilterService.filterOn -> "LIGADO"
             else -> "aguardando"
@@ -499,8 +494,7 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
             (if (stack.isNotEmpty()) "\n   onde ficou presa: $stack" else "") + "\n" +
             "TV — RAM livre: ${if (Diag.availMb >= 0) "${Diag.availMb} MB" else "?"} · pouca memória: ${if (Diag.lowMemory) "SIM" else "não"}" +
             " (avisos do sistema: ${Diag.trimCount}x) · GC que bloqueou o app: ${Diag.gcBlockMs} ms (${Diag.gcBlockCount}x)\n" +
-            "Bloqueio de teclas: $filt · resposta do serviço: até ${KeyFilterService.maxMs} ms em ${KeyFilterService.calls} teclas (↑ ↓ no controle ou Scroll Lock alterna)\n" +
-            "Teclado USB direto: ${usbText()}\n" +
+            "Bloqueio de teclas: $filt · chegada ao serviço (pior): ${KeyFilterService.entryMaxMs} ms${if (KeyFilterService.entryMaxAt != 0L) " (${ago(KeyFilterService.entryMaxAt)})" else ""} · resposta do serviço: até ${KeyFilterService.maxMs} ms em ${KeyFilterService.calls} teclas (↑ ↓ no controle ou Scroll Lock alterna)\n" +
             "Teclado — eventos recebidos: ${InputBridge.keyEvents}" +
             (if (InputBridge.lastKeyAt != 0L) " (última ${InputBridge.lastKeyName}, ${ago(InputBridge.lastKeyAt)})" else "") +
             " · apertadas agora (app): ${InputBridge.heldText()}" +
@@ -538,7 +532,6 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
 
     /** Desenha o painel (fora de jogo) com a cópia do estado do Bluetooth: nenhuma chamada ao Bluetooth aqui. */
     private fun render() {
-        btnUsb.text = if (UsbDirect.enabled) "Teclado: USB direto (ligado)" else "Teclado: pelo Android (USB direto desligado)"
         val h = HidLink.host
         when {
             !HidLink.supported -> { statusText.text = HidLink.status; statusText.setTextColor(0xFFFF5A6A.toInt()) }
@@ -580,7 +573,6 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
         HidLink.listener = this
         InputWatcher.listener = this
         HubCommands.handler = { handleCommand(it) }
-        UsbDirect.prepare()
         if (KeyFilterService.instance == null && tryEnableService()) main.postDelayed({ update() }, 1000)
         update()
     }
@@ -595,7 +587,6 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
             engaged = false
             InputBridge.capturing = false
             KeyFilterService.instance?.setFilter(false)
-            UsbDirect.stop()
             Diag.stop()
             unboostMain()
             main.removeCallbacks(hudTick)
@@ -628,13 +619,6 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
         if (!engaged) return
         main.removeCallbacks(recapture)
         main.postDelayed(recapture, 400)
-    }
-
-    private fun usbText(): String = when {
-        !UsbDirect.enabled -> "DESLIGADO (teclado pelo Android; F11 liga)"
-        UsbDirect.active -> "LIGADO — ${UsbDirect.status} (${UsbDirect.reports} relatórios, último ${ago(UsbDirect.lastReportAt)}) · F11 desliga"
-        else -> "ligado, mas ${UsbDirect.status} (enquanto isso o teclado funciona pelo Android)" +
-            (if (UsbDirect.seen.isNotEmpty()) "\nUSB visto pelo app: ${UsbDirect.seen}" else "")
     }
 
     private fun ago(t: Long): String = if (t == 0L) "nunca" else "${(SystemClock.uptimeMillis() - t) / 1000}s atrás"
@@ -677,14 +661,10 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
                 if (engaged) release(true) else if (HidLink.connected) { manualOff = false; resetDiag(); engage() }
             HubCommands.RATE -> { HidLink.cycleRate(); if (engaged) updateHud() }
             HubCommands.KEEPALIVE -> { HidLink.toggleKeepAlive(); if (engaged) updateHud() }
-            HubCommands.USB -> {
-                UsbDirect.enabled = !UsbDirect.enabled
-                prefs.usbDirect = UsbDirect.enabled
-                if (engaged) { if (UsbDirect.enabled) UsbDirect.start() else UsbDirect.stop(); updateHud() } else update()
-            }
             HubCommands.FILTER -> {
                 Diag.filterEnabled = !Diag.filterEnabled
                 prefs.filterOn = Diag.filterEnabled
+                if (Diag.filterEnabled) Diag.autoOff = false   // ligar à mão tenta de novo
                 KeyFilterService.instance?.setFilter(engaged)
                 if (engaged) updateHud()
             }

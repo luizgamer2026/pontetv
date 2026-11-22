@@ -22,13 +22,8 @@ class TvPrefs(ctx: Context) {
 
     /** Bloqueio de teclas do sistema (filtro de acessibilidade) enquanto controla o celular. ↑/↓ do controle ou Scroll Lock alternam. */
     var filterOn: Boolean
-        get() = sp.getBoolean("filterOn", false)
-        set(v) { sp.edit().putBoolean("filterOn", v).apply() }
-
-    /** Modo USB direto do teclado (lê pela porta USB, sem passar pelo sistema da TV). F11 ou botão do painel alternam. */
-    var usbDirect: Boolean
-        get() = sp.getBoolean("usbDirect", true)
-        set(v) { sp.edit().putBoolean("usbDirect", v).apply() }
+        get() = sp.getBoolean("filterOn2", true)
+        set(v) { sp.edit().putBoolean("filterOn2", v).apply() }
 
     /** true = transporte BLE (HOGP); false = Bluetooth clássico. */
     var ble: Boolean
