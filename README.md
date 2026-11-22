@@ -36,6 +36,31 @@ Módulos: `phone` (Android 10+, pareia e mostra "Teclado e mouse conectados") ·
 * A imagem do celular na TV não faz parte do app (use o espelhamento nativo/cabo, se quiser).
 * Velocidade do mouse: configuração de ponteiro do próprio celular.
 
+## v2.15: o teclado não morre com o bloqueio ligado
+
+**Causa achada no código (tecla presa):** com o filtro ligado, se o sistema demora mais de 500 ms para ouvir a resposta do serviço, ele desiste e manda a mesma tecla
+pelo caminho normal. Ela chegava duas vezes (serviço e tela), às vezes fora de ordem: o DOWN atrasado chegava **depois** do UP que o serviço já tinha tratado, e ninguém mais soltava a tecla
+(o reenvio a cada 250 ms mantinha ela presa até apertar de novo). Agora:
+
+* **Tecla repetida ou atrasada é descartada:** o `InputBridge` guarda o último evento de cada tecla física (aparelho + scancode) e ignora o que for igual ou mais velho. O F8 também não roda duas vezes.
+  HUD: `descartadas (duplicada/atrasada): N`.
+* **Bloqueio com 3 modos, valendo antes e depois de conectar:** botão **Bloqueio de teclas** no painel da TV (Inteligente → Forte → Desligado). Scroll Lock liga/desliga também antes de conectar (↑ ↓ do controle, só em jogo).
+  O modo fica salvo e é o que entra quando o celular conecta.
+  * **Inteligente (padrão):** se a TV atrasar a entrega (>= 700 ms, ou duas vezes >= 350 ms em 6 s), o filtro **pausa** e as teclas seguem o caminho normal (o teclado não morre).
+    Ele **volta sozinho** quando nada está apertado e teclado/mouse pararam por 0,8 s, depois de 20 s de espera (dobra a cada pausa: 40 s, 80 s… até 5 min; volta a 20 s se ficou 10 min sem problema).
+  * **Forte:** nunca pausa sozinho (só conta os atrasos no HUD). Use para ver se, no seu caso, o atraso passa.
+* **Bug "liguei antes de conectar e apareceu desligado":** (1) o painel só dizia se o *serviço* estava ligado, não se o *bloqueio* estava ligado (a escolha salva podia estar desligada por um teste antigo): agora há um botão e um texto só;
+  (2) se o sistema ainda não aceitava o filtro, o app desistia em silêncio: agora confere lendo de volta e tenta de novo (até ~4 s);
+  (3) um serviço que ficou "ligado na lista" mas não está rodando nunca era religado: agora o app tira e põe de novo na lista (precisa do `pm grant` por ADB já feito) quando ele some, ao abrir o app e durante o jogo;
+  (4) o serviço lê o modo salvo ao conectar, mesmo que ele suba antes da tela.
+* **Menos chamadas ao sistema durante o jogo:** a RAM livre vem de `/proc/meminfo` (antes era `ActivityManager.getMemoryInfo`, uma chamada ao `system_server` a cada 2 s); o painel de diagnóstico não gera eventos de acessibilidade;
+  gravar o serviço nas configurações seguras roda fora da thread principal.
+* **HUD:** `Bloqueio de teclas: LIGADO|PAUSADO|DESLIGADO (modo)`, `chegaram >= 350 ms`, `pausas (religou)`, `filtro recusado`.
+* **USB direto:** as sobras (vid:pid guardado, textos) saíram do código.
+
+**Como testar:** deixe no modo Inteligente e jogue. Tire a foto do HUD logo depois de uma travada: `chegada ao serviço (pior)` alto + `chegaram >= 350 ms` > 0 = o atraso é do sistema da TV (dentro do filtro);
+`descartadas` > 0 = o sistema reenviou teclas e o app evitou tecla presa. Depois teste o modo Forte para comparar.
+
 ## v2.14: bloqueio inteligente (e o USB direto sai)
 
 **USB direto removido.** Na HUD, `USB visto pelo app` listou só um pendrive e o chip de Wi-Fi/Bluetooth da TV: o teclado (1a2c:6004) e o mouse não aparecem na API USB.
@@ -49,33 +74,6 @@ de o app recebê-las (o `HidKeys` já converte F1…F12); o único jeito de um a
 * `InputBridge` ficou sincronizado (o serviço e a tela mexem no estado das teclas de threads diferentes);
 * o bloqueio vem **ligado** por padrão de novo (preferência nova `filterOn2`);
 * HUD: `chegada ao serviço (pior): X ms` (da tecla nascer até o sistema chamar o serviço) separa "o sistema demora" de "o app demora", e aparece `DESLIGADO SOZINHO: a TV atrasou X ms`.
-
-## v2.13: o USB direto não achava o teclado
-
-Na HUD de teste: `Teclado USB direto: ligado, mas procurando teclado USB…` (a permissão não era o problema: se fosse, diria "aguardando você aceitar o acesso USB").
-O app só aceitava teclado com interface HID "boot" (3/1/1); o SEMICO pode ter outra. Agora:
-
-* acha o aparelho USB com o **mesmo vid:pid do teclado que o Android já reconheceu** (o `InputWatcher` guarda); senão, qualquer um com interface boot de teclado;
-* na interface HID escolhe a "boot" ou, se não houver, **lê o descritor de relatório** e aceita a coleção Teclado de 64 bits (com ou sem report ID);
-* a HUD mostra `USB visto pelo app:` com `vid:pid nome [interface:classe/subclasse/protocolo]` de cada aparelho, ou `nenhum dispositivo USB visível ao app` (a TV esconderia o USB dos apps);
-* o filtro do manifest passou a casar qualquer aparelho HID (permite "usar por padrão" e guardar a permissão).
-
-## v2.12: modo USB direto do teclado (sem o filtro de acessibilidade)
-
-**Causa confirmada em teste:** com o bloqueio de teclas (filtro de acessibilidade) ligado, o teclado morria e a entrega chegava a ~2 s (1637 ms, 1971 ms), e F8/F9
-(sair, trocar Hz) também paravam de responder. Com o filtro, o sistema da TV entrega as teclas uma por vez e espera até 500 ms pela resposta do serviço
-(~4 esperas = ~2 s); numa TV de ~900 MB o `system_server` atrasa essa resposta. O app não tem como acelerar isso: a saída é não usar o filtro.
-
-**O que o modo faz:** o app lê o teclado USB direto pela porta USB (`UsbManager`, interface HID "boot": relatório de 8 bytes), pega a interface com
-`claimInterface(force)` (o Android solta o driver dele) e manda o relatório como está pelo Bluetooth. O sistema da TV nunca vê as teclas: F1…F12, Windows e Esc não agem na TV
-e **não há nada para bloquear**, sem filtro e sem `system_server` no caminho. Só roda enquanto o teclado controla o celular; F8/VOLTAR devolvem a interface
-(`releaseInterface`) e o Android religa o teclado. O mouse continua pelo Android (captura), para a roda e os botões extras continuarem funcionando.
-
-* **Permissão:** o Android pede "permitir acesso USB" ao abrir o app (marque "usar por padrão" para não perguntar de novo; o app tem filtro para teclados USB).
-* **Reserva automática:** sem permissão, sem teclado USB ou com qualquer erro, o teclado segue funcionando pelo caminho normal do Android (bloqueio desligado).
-* **F11** (ou o botão "Teclado: USB direto" do painel) liga/desliga o modo; a escolha fica salva. F8, F9/Insert, F10/Pause e Scroll Lock continuam como comandos, agora lidos do USB.
-* **HUD:** `Teclado USB direto: LIGADO — lendo … (N relatórios, último há Ns)` ou o motivo de não estar ativo. A entrada/saída do teclado causada por pegar/devolver a interface não conta como "USB removido".
-* O bloqueio por acessibilidade continua existindo (↑/↓ do controle ou Scroll Lock), desligado por padrão: não é mais necessário.
 
 ## v2.11: teclado/mouse "morrendo" no meio do jogo
 

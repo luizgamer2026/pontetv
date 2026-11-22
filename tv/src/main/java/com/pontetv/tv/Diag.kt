@@ -1,6 +1,5 @@
 package com.pontetv.tv
 
-import android.app.ActivityManager
 import android.content.Context
 import android.os.Debug
 import android.os.Handler
@@ -8,23 +7,35 @@ import android.os.Looper
 import android.os.SystemClock
 
 /**
- * Diagnóstico do que acontece DENTRO da TV (o Bluetooth já é medido no HidLink).
+ * Diagnóstico do que acontece DENTRO da TV (o Bluetooth já é medido no HidLink) + estado do bloqueio de teclas.
  *
- * Uma thread própria (fora da thread principal) faz três coisas enquanto o teclado/mouse controlam o celular:
+ * Uma thread própria (fora da thread principal) faz, enquanto o teclado/mouse controlam o celular:
  *  1. manda um "ping" para a thread principal a cada ~40 ms e mede quanto ele demorou para ser atendido;
- *     se a thread principal ficar parada >= 250 ms, tira uma "foto" da pilha dela, que mostra ONDE ela estava presa
- *     (uma chamada ao Bluetooth, GC, desenho de tela...). Se a pilha mostrar a thread ociosa e mesmo assim houve atraso,
- *     é a TV inteira que parou (pouca memória/CPU), não o app;
- *  2. lê a RAM livre da TV;
- *  3. lê o tempo total de GC que bloqueou o app.
+ *     se a thread principal ficar parada >= 250 ms, tira uma "foto" da pilha dela;
+ *  2. lê a RAM livre da TV (direto de /proc/meminfo: sem chamar o system_server, que é justamente o que pode estar lento);
+ *  3. lê o tempo total de GC que bloqueou o app;
+ *  4. mantém o bloqueio de teclas saudável: religa o serviço se ele sumiu, confere o filtro e religa o bloqueio inteligente quando a TV volta ao normal.
  */
 object Diag {
-    /** Bloqueio de teclas do sistema (filtro de acessibilidade) ligado pelo usuário. ↑/↓ do controle ou Scroll Lock alternam. */
-    @Volatile var filterEnabled = true
-    /** O app desligou o filtro sozinho porque a TV atrasou a entrega das teclas (volta a tentar quando o teclado é pego de novo). */
+    /**
+     * Modo do bloqueio de teclas do sistema (filtro de acessibilidade):
+     *  0 = desligado · 1 = inteligente (pausa sozinho se a TV atrasar e religa quando tudo está parado) · 2 = forte (nunca pausa sozinho).
+     */
+    @Volatile var mode = 1
+    val filterEnabled: Boolean get() = mode != 0
+    val smart: Boolean get() = mode == 1
+
+    /** O bloqueio inteligente pausou o filtro porque a TV atrasou a entrega das teclas (volta sozinho depois de [cooldownMs], com tudo parado). */
     @Volatile var autoOff = false
     @Volatile var autoOffMs = 0
     @Volatile var autoOffAt = 0L
+    @Volatile var autoOffCount = 0
+    @Volatile var rearms = 0
+    @Volatile var cooldownMs = 0L
+    /** Desde quando o filtro está armado (liga ao pegar o teclado ou ao religar sozinho). */
+    @Volatile var armedAt = 0L
+
+    fun loadPrefs(ctx: Context) { mode = TvPrefs(ctx).filterMode.coerceIn(0, 2) }
 
     @Volatile var mainLagMax = 0
     @Volatile var mainLagMaxAt = 0L
@@ -45,8 +56,7 @@ object Diag {
     @Volatile private var gen = 0   // evita duas threads se o controle for solto e retomado rápido
     @Volatile private var postedAt = 0L
     @Volatile private var curStack = ""
-    private var am: ActivityManager? = null
-    private val mi = ActivityManager.MemoryInfo()
+    private var appCtx: Context? = null
 
     private val pong = Runnable {
         val p = postedAt
@@ -69,7 +79,7 @@ object Diag {
         running = true
         postedAt = 0L
         val g = ++gen
-        am = ctx.applicationContext.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
+        appCtx = ctx.applicationContext
         Thread({ loop(g) }, "PonteTV-Diag").apply { isDaemon = true; start() }
     }
 
@@ -79,6 +89,7 @@ object Diag {
 
     private fun loop(g: Int) {
         var nextSample = 0L
+        var nextSync = 0L
         var stackAt = 0L
         var released = false
         while (running && gen == g) {
@@ -100,6 +111,12 @@ object Diag {
                 HidLink.send(HidDescriptor.ID_KEYBOARD, ByteArray(HidDescriptor.KEYBOARD_SIZE))
                 HidLink.sendMouse(0, 0, 0, 0, 0)
             } else if (p == 0L || now - p < 1500L) released = false
+            // bloqueio de teclas: religa o inteligente quando tudo está parado (barato: só lê variáveis)
+            KeyFilterService.maybeRearm(now)
+            if (now >= nextSync) {
+                nextSync = now + 1000L
+                appCtx?.let { KeyFilterService.sync(it, now) }
+            }
             if (now >= nextSample) { nextSample = now + 2000L; sample() }
             try { Thread.sleep(40) } catch (_: InterruptedException) {}
         }
@@ -110,17 +127,34 @@ object Diag {
     } catch (_: Throwable) { "" }
 
     private fun sample() {
+        // /proc/meminfo em vez de ActivityManager.getMemoryInfo: este é uma chamada ao system_server (com a trava global dele)
+        // a cada 2 s, justamente o processo que pode estar atrasando as teclas.
         try {
-            val a = am
-            if (a != null) {
-                a.getMemoryInfo(mi)
-                availMb = (mi.availMem / 1048576L).toInt()
-                lowMemory = mi.lowMemory
-            }
+            val mb = readAvailMb()
+            if (mb >= 0) { availMb = mb; lowMemory = mb < 100 }
         } catch (_: Throwable) {}
         try {
             Debug.getRuntimeStat("art.gc.blocking-gc-time")?.toLongOrNull()?.let { gcBlockMs = it }
             Debug.getRuntimeStat("art.gc.blocking-gc-count")?.toLongOrNull()?.let { gcBlockCount = it }
         } catch (_: Throwable) {}
     }
+
+    private fun num(l: String): Long = l.filter { it.isDigit() }.toLongOrNull() ?: 0L
+
+    private fun readAvailMb(): Int =
+        java.io.BufferedReader(java.io.FileReader("/proc/meminfo")).use { r ->
+            var avail = -1L; var free = 0L; var cached = 0L
+            var line = r.readLine()
+            var n = 0
+            while (line != null && n++ < 16) {
+                when {
+                    line.startsWith("MemAvailable:") -> avail = num(line)
+                    line.startsWith("MemFree:") -> free = num(line)
+                    line.startsWith("Cached:") -> cached = num(line)
+                }
+                line = r.readLine()
+            }
+            val kb = if (avail >= 0) avail else free + cached
+            (kb / 1024L).toInt()
+        }
 }

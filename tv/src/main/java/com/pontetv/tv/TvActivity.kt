@@ -48,6 +48,7 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
     private lateinit var btnControl: TextView
     private lateinit var btnEnable: TextView
     private lateinit var btnMode: TextView
+    private lateinit var btnFilter: TextView
     private lateinit var a11yText: TextView
     private var engaged = false
     private var manualOff = false
@@ -70,7 +71,7 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
     override fun onCreate(b: Bundle?) {
         super.onCreate(b)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        Diag.filterEnabled = prefs.filterOn
+        Diag.mode = prefs.filterMode.coerceIn(0, 2)
         HidLink.init(this)
         build()
         InputWatcher.onTopology = { scheduleRecapture() }
@@ -171,7 +172,9 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
         col.addView(btns, LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(18) })
         val btns2 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         btnMode = tvButton("Modo: Bluetooth clássico") { toggleMode() }
+        btnFilter = tvButton("Bloqueio de teclas: Inteligente") { cycleFilterMode() }
         btns2.addView(btnMode)
+        btns2.addView(btnFilter, LinearLayout.LayoutParams(-2, -2).apply { leftMargin = dp(12) })
         col.addView(btns2, LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(12) })
         visible.requestFocus()
 
@@ -191,6 +194,8 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
         }
         hudTitle = label("", 34f, 0xFF22D3A6.toInt(), true).apply { gravity = Gravity.CENTER }
         hudSub = label("", 18f, 0xFFEAF0FF.toInt()).apply { gravity = Gravity.CENTER }
+        // o painel de diagnóstico muda a cada 2 s: com a acessibilidade ligada isso gera eventos que cada app manda ao sistema; este painel não precisa deles
+        hud.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
         hud.addView(hudTitle)
         hud.addView(hudSub, LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(14) })
         hudStats = label("", 16f, 0xFF8FA3C8.toInt()).apply { gravity = Gravity.CENTER }
@@ -298,6 +303,8 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
 
     private fun openAccessibility() {
         if (tryEnableService()) {
+            A11yEnabler.kick(this, true) // estava na lista mas parado? religa
+            if (Diag.mode == 0) setMode(prefs.lastOnMode)
             Toast.makeText(this, "Bloqueio de teclas ligado.", Toast.LENGTH_SHORT).show()
             main.postDelayed({ update() }, 1000)
             return
@@ -365,6 +372,26 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
         } catch (e: Exception) { Toast.makeText(this, msg, Toast.LENGTH_LONG).show() }
     }
 
+    private fun modeLabel(m: Int) = when (m) { 1 -> "inteligente"; 2 -> "forte"; else -> "desligado" }
+
+    /**
+     * Muda o modo do bloqueio de teclas (0 desligado · 1 inteligente · 2 forte). Vale na hora, antes ou depois de conectar o celular,
+     * e fica salvo: ao conectar, o bloqueio entra no modo que está aqui.
+     */
+    private fun setMode(m: Int) {
+        Diag.mode = m
+        prefs.filterMode = m
+        if (m != 0) {
+            prefs.lastOnMode = m
+            Diag.autoOff = false; Diag.cooldownMs = 0L; Diag.armedAt = SystemClock.uptimeMillis()
+            if (KeyFilterService.instance == null) A11yEnabler.enableAsync(this) { main.postDelayed({ update() }, 1000) }
+        }
+        KeyFilterService.refresh()
+        if (engaged) updateHud() else update()
+    }
+
+    private fun cycleFilterMode() = setMode(when (Diag.mode) { 1 -> 2; 2 -> 0; else -> 1 })
+
     /** Troca entre Bluetooth clássico e BLE (precisa soltar o controle e parear de novo no celular). */
     private fun toggleMode() {
         if (engaged) release(true)
@@ -391,9 +418,11 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
         engaged = true
         InputBridge.capturing = true
         boostMain()
+        // a cada vez que o teclado é pego, o bloqueio começa do zero (sem pausa, sem espera) e com o modo que o usuário deixou salvo
+        Diag.autoOff = false; Diag.cooldownMs = 0L; Diag.armedAt = SystemClock.uptimeMillis()
         Diag.start(this)
-        Diag.autoOff = false   // a cada vez que o teclado é pego, o bloqueio tenta de novo
-        KeyFilterService.instance?.setFilter(true)
+        if (Diag.filterEnabled && KeyFilterService.instance == null) A11yEnabler.enableAsync(this) // serviço fora do ar: liga (a conferência de 1 s religa de vez se precisar)
+        KeyFilterService.refresh()
         panel.visibility = View.GONE
         hud.visibility = View.VISIBLE
         root.pointerIcon = PointerIcon.getSystemIcon(this, PointerIcon.TYPE_NULL)
@@ -473,12 +502,13 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
     /** Só este TextView muda a cada 2 s (pouco trabalho de layout na thread que recebe o mouse). */
     private fun updateStats() {
         val svc = KeyFilterService.instance
+        val modeName = modeLabel(Diag.mode)
         val filt = when {
-            !Diag.filterEnabled -> "DESLIGADO (F1…F12/Esc também agem na TV; ↑ ↓ liga)"
-            Diag.autoOff -> "DESLIGADO SOZINHO: a TV atrasou ${Diag.autoOffMs} ms (${ago(Diag.autoOffAt)}); tenta de novo ao soltar (F8) e pegar"
-            svc == null -> "serviço de acessibilidade não está ligado (sem bloqueio)"
-            KeyFilterService.filterOn -> "LIGADO"
-            else -> "aguardando"
+            !Diag.filterEnabled -> "DESLIGADO (F1…F12/Esc também agem na TV; Scroll Lock liga)"
+            svc == null -> "serviço de acessibilidade não está rodando (sem bloqueio); tentando religar…"
+            Diag.autoOff -> "PAUSADO ($modeName): a TV atrasou ${Diag.autoOffMs} ms (${ago(Diag.autoOffAt)}); volta sozinho com tudo parado (espera ${Diag.cooldownMs / 1000}s)"
+            KeyFilterService.filterOn -> "LIGADO ($modeName)"
+            else -> "ligando… ($modeName)"
         }
         val stack = Diag.worstStack.let { if (it.length > 190) it.take(190) + "…" else it }
         val t = "Bluetooth: ${HidLink.statRate} envios/s · envio mais lento ${HidLink.statWorstMs} ms\n" +
@@ -494,7 +524,11 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
             (if (stack.isNotEmpty()) "\n   onde ficou presa: $stack" else "") + "\n" +
             "TV — RAM livre: ${if (Diag.availMb >= 0) "${Diag.availMb} MB" else "?"} · pouca memória: ${if (Diag.lowMemory) "SIM" else "não"}" +
             " (avisos do sistema: ${Diag.trimCount}x) · GC que bloqueou o app: ${Diag.gcBlockMs} ms (${Diag.gcBlockCount}x)\n" +
-            "Bloqueio de teclas: $filt · chegada ao serviço (pior): ${KeyFilterService.entryMaxMs} ms${if (KeyFilterService.entryMaxAt != 0L) " (${ago(KeyFilterService.entryMaxAt)})" else ""} · resposta do serviço: até ${KeyFilterService.maxMs} ms em ${KeyFilterService.calls} teclas (↑ ↓ no controle ou Scroll Lock alterna)\n" +
+            "Bloqueio de teclas: $filt\n" +
+            "   chegada ao serviço (pior): ${KeyFilterService.entryMaxMs} ms${if (KeyFilterService.entryMaxAt != 0L) " (${ago(KeyFilterService.entryMaxAt)})" else ""}" +
+            " · resposta do serviço: até ${KeyFilterService.maxMs} ms em ${KeyFilterService.calls} teclas · chegaram ≥350 ms: ${KeyFilterService.lateKeys}x" +
+            " · pausas: ${Diag.autoOffCount}x (religou ${Diag.rearms}x) · descartadas (duplicada/atrasada): ${InputBridge.dupes}x · filtro recusado: ${KeyFilterService.applyFails}x" +
+            " (Scroll Lock ou ↑ ↓ liga/desliga)\n" +
             "Teclado — eventos recebidos: ${InputBridge.keyEvents}" +
             (if (InputBridge.lastKeyAt != 0L) " (última ${InputBridge.lastKeyName}, ${ago(InputBridge.lastKeyAt)})" else "") +
             " · apertadas agora (app): ${InputBridge.heldText()}" +
@@ -546,9 +580,13 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
         btText.text = "Nome Bluetooth desta TV: ${HidLink.snapName}"
         devText.text = "Teclado da TV: ${InputWatcher.kb?.let { "detectado ($it)" } ?: "não detectado"}\n" +
             "Mouse da TV: ${InputWatcher.mouse?.let { "detectado ($it)" } ?: "não detectado"}"
-        a11yText.text = if (KeyFilterService.instance != null)
-            "Bloqueio de teclas na TV: ligado (Esc, F1…F12 e Windows vão só para o celular)"
-        else "Bloqueio de teclas na TV: desligado. Toque em \"Bloquear teclas na TV\" (abre as Configurações). Para ligar sozinho a cada vez que a TV ligar, use o ADB uma vez (toque 3x para ver o passo a passo)."
+        val svcOn = KeyFilterService.instance != null
+        a11yText.text = when {
+            Diag.mode == 0 -> "Bloqueio de teclas: DESLIGADO por você (Esc, F1…F12 e Windows também agem na TV). Toque em \"Bloqueio de teclas\" para ligar."
+            svcOn -> "Bloqueio de teclas: ${modeLabel(Diag.mode).uppercase()}, serviço ligado (Esc, F1…F12 e Windows vão só para o celular quando conectar)"
+            else -> "Bloqueio de teclas: ${modeLabel(Diag.mode)}, mas o serviço de acessibilidade está DESLIGADO. Toque em \"Bloquear teclas na TV\" (abre as Configurações). Para ligar sozinho a cada vez que a TV ligar, use o ADB uma vez (toque 3x para ver o passo a passo)."
+        }
+        btnFilter.text = "Bloqueio de teclas: ${modeLabel(Diag.mode).replaceFirstChar { it.uppercase() }} (toque para mudar)"
         btnMode.text = if (HidLink.bleMode) "Modo: BLE (toque para voltar ao clássico)" else "Modo: Bluetooth clássico (toque para testar BLE)"
         btnEnable.visibility = if (HidLink.hasAdapter() && !HidLink.snapEnabled) View.VISIBLE else View.GONE
         btnControl.visibility = if (HidLink.connected && !engaged) View.VISIBLE else View.GONE
@@ -573,7 +611,10 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
         HidLink.listener = this
         InputWatcher.listener = this
         HubCommands.handler = { handleCommand(it) }
-        if (KeyFilterService.instance == null && tryEnableService()) main.postDelayed({ update() }, 1000)
+        if (KeyFilterService.instance == null) {
+            A11yEnabler.enableAsync(this) { main.postDelayed({ update() }, 1000) }
+            main.postDelayed({ if (KeyFilterService.instance == null && Diag.filterEnabled) A11yEnabler.kick(this, false) }, 4000)
+        }
         update()
     }
 
@@ -661,13 +702,7 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
                 if (engaged) release(true) else if (HidLink.connected) { manualOff = false; resetDiag(); engage() }
             HubCommands.RATE -> { HidLink.cycleRate(); if (engaged) updateHud() }
             HubCommands.KEEPALIVE -> { HidLink.toggleKeepAlive(); if (engaged) updateHud() }
-            HubCommands.FILTER -> {
-                Diag.filterEnabled = !Diag.filterEnabled
-                prefs.filterOn = Diag.filterEnabled
-                if (Diag.filterEnabled) Diag.autoOff = false   // ligar à mão tenta de novo
-                KeyFilterService.instance?.setFilter(engaged)
-                if (engaged) updateHud()
-            }
+            HubCommands.FILTER -> setMode(if (Diag.mode == 0) prefs.lastOnMode else 0)
         }
     }
 
@@ -676,8 +711,12 @@ class TvActivity : Activity(), HidLink.Listener, InputWatcher.Listener {
         val down = e.action == KeyEvent.ACTION_DOWN && e.repeatCount == 0
         val cmd = if (kb) HubCommands.forKey(e.keyCode) else 0
         if (cmd != 0) {
-            val usable = if (cmd == HubCommands.RELEASE_TOGGLE) (engaged || HidLink.connected) else engaged
-            if (usable) { if (down) handleCommand(cmd); return true }
+            val usable = when (cmd) {
+                HubCommands.RELEASE_TOGGLE -> engaged || HidLink.connected
+                HubCommands.FILTER -> true   // Scroll Lock liga/desliga o bloqueio também antes de conectar o celular
+                else -> engaged
+            }
+            if (usable) { if (down && HubCommands.fresh(e)) handleCommand(cmd); return true }
         }
         if (engaged) {
             if (kb || (e.action == KeyEvent.ACTION_UP && InputBridge.isHeld(e))) { InputBridge.key(e); return true }

@@ -12,6 +12,19 @@ object HubCommands {
     /** Quem executa os comandos (a tela da TV registra aqui). Também é chamado pelo serviço de bloqueio. */
     @Volatile var handler: ((Int) -> Unit)? = null
 
+    @Volatile private var lastCmdKey = 0
+    @Volatile private var lastCmdTime = 0L
+
+    /**
+     * false se este comando já foi tratado: se o serviço demorar mais que o limite do sistema (500 ms), a mesma tecla chega também pela tela,
+     * e o F8 (soltar/voltar) seria executado duas vezes (soltava e já pegava de novo).
+     */
+    @Synchronized fun fresh(e: KeyEvent): Boolean {
+        if (e.keyCode == lastCmdKey && e.eventTime == lastCmdTime) return false
+        lastCmdKey = e.keyCode; lastCmdTime = e.eventTime
+        return true
+    }
+
     /**
      * F8 solta/volta. F9 e Insert trocam o ritmo; F10 e Pause ligam/desligam o keepalive.
      * Em muitas TVs o F9 é a tecla "Apps" e abre o launcher: por isso há Insert/Pause e o controle remoto como alternativa.

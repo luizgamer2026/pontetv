@@ -20,10 +20,15 @@ class TvPrefs(ctx: Context) {
         get() = sp.getBoolean("keepAlive", true)
         set(v) { sp.edit().putBoolean("keepAlive", v).apply() }
 
-    /** Bloqueio de teclas do sistema (filtro de acessibilidade) enquanto controla o celular. ↑/↓ do controle ou Scroll Lock alternam. */
-    var filterOn: Boolean
-        get() = sp.getBoolean("filterOn2", true)
-        set(v) { sp.edit().putBoolean("filterOn2", v).apply() }
+    /** Modo do bloqueio de teclas: 0 = desligado, 1 = inteligente (padrão), 2 = forte. Vale antes e depois de conectar o celular. */
+    var filterMode: Int
+        get() = sp.getInt("filterMode", 1)
+        set(v) { sp.edit().putInt("filterMode", v).apply() }
+
+    /** Último modo ligado (1 ou 2): é para ele que Scroll Lock / ↑ ↓ voltam quando o bloqueio estava desligado. */
+    var lastOnMode: Int
+        get() = sp.getInt("lastOnMode", 1).coerceIn(1, 2)
+        set(v) { sp.edit().putInt("lastOnMode", v).apply() }
 
     /** true = transporte BLE (HOGP); false = Bluetooth clássico. */
     var ble: Boolean

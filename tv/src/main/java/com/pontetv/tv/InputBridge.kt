@@ -32,11 +32,22 @@ object InputBridge {
     @Volatile var unmapped = 0
     @Volatile var lastUnmapped = ""
     @Volatile var overflow = 0   // vezes que passou de 6 teclas ao mesmo tempo
+    /** Eventos de tecla descartados por serem repetidos ou mais velhos que um que já foi aplicado (o sistema às vezes entrega a mesma tecla pelo serviço e depois pela tela). */
+    @Volatile var dupes = 0
+    /** Quando chegou o último evento de teclado/mouse (para o bloqueio inteligente só religar com tudo parado). */
+    @Volatile var lastInputAt = 0L
     private val names = HashMap<Int, String>()
+    // último evento aplicado por tecla física (aparelho + scancode): evita que um DOWN atrasado, que o sistema reenvia depois do tempo limite,
+    // chegue DEPOIS do UP e deixe a tecla presa (o UP já tinha sido consumido pelo serviço, ninguém mais solta a tecla)
+    private val lastT = HashMap<Long, Long>()
+    private val lastA = HashMap<Long, Int>()
     fun resetDiag() {
         deliveryMaxMs = 0; deliveryMaxAt = 0L; deliveryMaxKind = ""; spikes = 0; lastSpikeAt = 0L
-        keyEvents = 0; lastKeyAt = 0L; lastKeyName = ""; unmapped = 0; lastUnmapped = ""; overflow = 0
+        keyEvents = 0; lastKeyAt = 0L; lastKeyName = ""; unmapped = 0; lastUnmapped = ""; overflow = 0; dupes = 0
     }
+
+    /** Nada apertado agora (teclas, modificadores e botões do mouse). */
+    @Synchronized fun idle(): Boolean = keys.isEmpty() && mods == 0 && buttons == 0
 
     /** Teclas apertadas segundo o estado interno do app (o que ele manda ao celular agora). Só na thread principal. */
     @Synchronized fun heldText(): String {
@@ -48,6 +59,7 @@ object InputBridge {
     }
     private fun noteDelivery(eventTime: Long, kind: String) {
         val now = SystemClock.uptimeMillis()
+        lastInputAt = now
         val d = (now - eventTime).toInt()
         if (d >= 200) { spikes++; lastSpikeAt = now }
         if (d > deliveryMaxMs) { deliveryMaxMs = d; deliveryMaxAt = now; deliveryMaxKind = kind }
@@ -71,6 +83,11 @@ object InputBridge {
         noteDelivery(e.eventTime, "tecla")
         if (e.action != KeyEvent.ACTION_DOWN && e.action != KeyEvent.ACTION_UP) return
         val down = e.action == KeyEvent.ACTION_DOWN
+        // mesma tecla física, evento repetido ou mais velho que o último aplicado: ignora
+        val id = (e.deviceId.toLong() shl 16) or (if (e.scanCode > 0) e.scanCode else 1000 + e.keyCode).toLong()
+        val pt = lastT[id]
+        if (pt != null && (e.eventTime < pt || (e.eventTime == pt && e.action == lastA[id]))) { dupes++; return }
+        lastT[id] = e.eventTime; lastA[id] = e.action
         val u = HidKeys.usage(e)
         val nm = KeyEvent.keyCodeToString(e.keyCode).removePrefix("KEYCODE_")
         keyEvents++; lastKeyAt = SystemClock.uptimeMillis(); lastKeyName = (if (down) "↓" else "↑") + nm
