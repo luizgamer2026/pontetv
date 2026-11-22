@@ -1,5 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<resources>
-    <string name="app_name">PonteTV Hub</string>
-    <string name="key_filter_desc">Impede que as teclas do teclado USB (Esc, F1 a F12, Windows, Enter…) sejam tratadas pela TV enquanto estão sendo enviadas ao celular.</string>
-</resources>

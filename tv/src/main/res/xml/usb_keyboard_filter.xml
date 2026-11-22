@@ -1,5 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<resources>
-    <!-- teclados USB (HID, subclasse boot, protocolo teclado): permite "usar por padrão" e guarda a permissão do modo USB direto -->
-    <usb-device class="3" subclass="1" protocol="1" />
-</resources>
