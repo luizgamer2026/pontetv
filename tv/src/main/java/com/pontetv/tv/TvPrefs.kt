@@ -25,6 +25,11 @@ class TvPrefs(ctx: Context) {
         get() = sp.getBoolean("filterOn", false)
         set(v) { sp.edit().putBoolean("filterOn", v).apply() }
 
+    /** Modo USB direto do teclado (lê pela porta USB, sem passar pelo sistema da TV). F11 ou botão do painel alternam. */
+    var usbDirect: Boolean
+        get() = sp.getBoolean("usbDirect", true)
+        set(v) { sp.edit().putBoolean("usbDirect", v).apply() }
+
     /** true = transporte BLE (HOGP); false = Bluetooth clássico. */
     var ble: Boolean
         get() = sp.getBoolean("ble", false)

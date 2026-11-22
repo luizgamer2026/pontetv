@@ -36,6 +36,23 @@ Módulos: `phone` (Android 10+, pareia e mostra "Teclado e mouse conectados") ·
 * A imagem do celular na TV não faz parte do app (use o espelhamento nativo/cabo, se quiser).
 * Velocidade do mouse: configuração de ponteiro do próprio celular.
 
+## v2.12: modo USB direto do teclado (sem o filtro de acessibilidade)
+
+**Causa confirmada em teste:** com o bloqueio de teclas (filtro de acessibilidade) ligado, o teclado morria e a entrega chegava a ~2 s (1637 ms, 1971 ms), e F8/F9
+(sair, trocar Hz) também paravam de responder. Com o filtro, o sistema da TV entrega as teclas uma por vez e espera até 500 ms pela resposta do serviço
+(~4 esperas = ~2 s); numa TV de ~900 MB o `system_server` atrasa essa resposta. O app não tem como acelerar isso: a saída é não usar o filtro.
+
+**O que o modo faz:** o app lê o teclado USB direto pela porta USB (`UsbManager`, interface HID "boot": relatório de 8 bytes), pega a interface com
+`claimInterface(force)` (o Android solta o driver dele) e manda o relatório como está pelo Bluetooth. O sistema da TV nunca vê as teclas: F1…F12, Windows e Esc não agem na TV
+e **não há nada para bloquear**, sem filtro e sem `system_server` no caminho. Só roda enquanto o teclado controla o celular; F8/VOLTAR devolvem a interface
+(`releaseInterface`) e o Android religa o teclado. O mouse continua pelo Android (captura), para a roda e os botões extras continuarem funcionando.
+
+* **Permissão:** o Android pede "permitir acesso USB" ao abrir o app (marque "usar por padrão" para não perguntar de novo; o app tem filtro para teclados USB).
+* **Reserva automática:** sem permissão, sem teclado USB ou com qualquer erro, o teclado segue funcionando pelo caminho normal do Android (bloqueio desligado).
+* **F11** (ou o botão "Teclado: USB direto" do painel) liga/desliga o modo; a escolha fica salva. F8, F9/Insert, F10/Pause e Scroll Lock continuam como comandos, agora lidos do USB.
+* **HUD:** `Teclado USB direto: LIGADO — lendo … (N relatórios, último há Ns)` ou o motivo de não estar ativo. A entrada/saída do teclado causada por pegar/devolver a interface não conta como "USB removido".
+* O bloqueio por acessibilidade continua existindo (↑/↓ do controle ou Scroll Lock), desligado por padrão: não é mais necessário.
+
 ## v2.11: teclado/mouse "morrendo" no meio do jogo
 
 Leitura da HUD de teste (Bluetooth saudável: envio mais lento 2 ms, fila 13 ms, 0 quedas do link, 0 foco perdido, 0 USB removido;
