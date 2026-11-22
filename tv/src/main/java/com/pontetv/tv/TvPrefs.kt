@@ -20,10 +20,15 @@ class TvPrefs(ctx: Context) {
         get() = sp.getBoolean("keepAlive", true)
         set(v) { sp.edit().putBoolean("keepAlive", v).apply() }
 
+    /** Bloqueio de teclas do sistema (filtro de acessibilidade) enquanto controla o celular. ↑/↓ do controle ou Scroll Lock alternam. */
+    var filterOn: Boolean
+        get() = sp.getBoolean("filterOn", false)
+        set(v) { sp.edit().putBoolean("filterOn", v).apply() }
+
     /** Modo USB direto do teclado (lê pela porta USB, sem passar pelo sistema da TV). F11 ou botão do painel alternam. */
     var usbDirect: Boolean
-        get() = sp.getBoolean("usbDirect213", true)   // chave nova na v2.13: quem desligou na v2.12 volta a ter o padrão ligado
-        set(v) { sp.edit().putBoolean("usbDirect213", v).apply() }
+        get() = sp.getBoolean("usbDirect", true)
+        set(v) { sp.edit().putBoolean("usbDirect", v).apply() }
 
     /** true = transporte BLE (HOGP); false = Bluetooth clássico. */
     var ble: Boolean

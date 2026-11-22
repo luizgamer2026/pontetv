@@ -19,6 +19,9 @@ import android.os.SystemClock
  *  3. lê o tempo total de GC que bloqueou o app.
  */
 object Diag {
+    /** Bloqueio de teclas do sistema (filtro de acessibilidade) ligado pelo usuário. ↑/↓ do controle ou Scroll Lock alternam. */
+    @Volatile var filterEnabled = true
+
     @Volatile var mainLagMax = 0
     @Volatile var mainLagMaxAt = 0L
     @Volatile var mainStalls = 0

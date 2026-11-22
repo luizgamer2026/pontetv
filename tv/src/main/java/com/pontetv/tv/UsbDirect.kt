@@ -5,30 +5,36 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
-import android.content.pm.PackageManager
 import android.hardware.usb.UsbConstants
 import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbDeviceConnection
 import android.hardware.usb.UsbEndpoint
 import android.hardware.usb.UsbInterface
 import android.hardware.usb.UsbManager
+import android.hardware.usb.UsbRequest
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import androidx.core.content.ContextCompat
+import java.nio.ByteBuffer
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeoutException
 
 /**
  * Modo "USB direto": o app lê o teclado USB da TV pela porta USB, sem passar pelo sistema Android da TV.
  *
- * Por quê: as teclas do sistema (F1…F12, Esc, Windows) são tratadas pela TV ANTES de chegarem a qualquer app. O jeito de elas
- * não agirem na TV é o sistema nunca ver a tecla: o app pega a interface HID do teclado (claimInterface com force: o Android solta o
- * driver dele), lê os relatórios de 8 bytes (modificadores + 6 teclas) e os manda como estão pelo Bluetooth.
+ * Por quê: o bloqueio de teclas por acessibilidade faz TODA tecla (e todo movimento do mouse) passar pelo system_server da TV e esperar até
+ * 500 ms pela resposta do serviço; numa TV de ~900 MB isso acumulava até ~2 s de atraso e o teclado "morria". Aqui o app pega a interface HID
+ * do teclado (claimInterface com force: o Android solta o driver dele), lê os relatórios de 8 bytes (modificadores + 6 teclas) e os manda
+ * como estão pelo Bluetooth. Como o sistema nunca vê as teclas, F1…F12/Windows/Esc não agem na TV e não há nada para bloquear.
  *
- * Só roda enquanto o teclado controla o celular (start/stop). Ao soltar (F8/VOLTAR), o app devolve a interface (releaseInterface) e o
- * Android religa o driver do teclado. Se algo falhar (sem permissão, sem teclado, erro), o teclado continua funcionando pelo caminho
- * normal do Android — e o HUD diz o motivo e o que o app enxerga de USB (campo [seen]).
- * O mouse continua pelo Android (captura do ponteiro): assim a roda de rolagem e os botões extras seguem funcionando.
+ * Como acha o teclado: (1) o aparelho USB com o mesmo vid:pid do teclado que o Android já reconheceu (InputWatcher); (2) senão, qualquer um com
+ * interface HID "boot" de teclado. Na interface HID escolhe a "boot" (relatório fixo de 8 bytes) ou, se não houver, lê o descritor de relatório e
+ * só aceita o formato padrão de 64 bits (com ou sem "report ID").
+ *
+ * Só roda enquanto o teclado controla o celular (start/stop). Ao soltar (F8/VOLTAR), o app devolve a interface (releaseInterface) e o Android
+ * religa o driver do teclado. Se algo falhar (sem permissão, sem teclado, formato diferente, erro), o teclado continua funcionando pelo caminho
+ * normal do Android. O mouse continua pelo Android (captura do ponteiro): assim a roda de rolagem e os botões extras seguem funcionando.
  */
 object UsbDirect {
     private const val ACTION_PERM = "com.pontetv.tv.USB_PERMISSION"
@@ -38,12 +44,11 @@ object UsbDirect {
     /** true = o app está lendo o teclado direto neste instante. */
     @Volatile var active = false
     @Volatile var status = "parado"
+    /** O que o app enxerga no USB (vid:pid nome [interface:classe/subclasse/protocolo]), para a HUD. */
+    @Volatile var seen = ""
     @Volatile var reports = 0
     @Volatile var lastReportAt = 0L
     @Volatile var errors = 0
-    /** Diagnóstico: o que o Android da TV deixa o app ver de USB (host sim/não, quantos aparelhos, vid:pid e [classe/subclasse/protocolo] de cada interface). */
-    @Volatile var seen = "?"
-    @Volatile private var hostFeature = true
 
     private var app: Context? = null
     private var um: UsbManager? = null
@@ -55,14 +60,12 @@ object UsbDirect {
     private var askedName: String? = null
     private var askedAt = 0L
     @Volatile private var deniedName: String? = null
-    // interfaces que não são teclado padrão (só mexida pela thread PonteTV-USB)
-    private val rejected = HashSet<String>()
+    private var seenAt = 0L
 
     fun init(ctx: Context) {
         if (app != null) return
         val a = ctx.applicationContext
         app = a
-        hostFeature = try { a.packageManager.hasSystemFeature(PackageManager.FEATURE_USB_HOST) } catch (_: Throwable) { true }
         um = a.getSystemService(Context.USB_SERVICE) as? UsbManager
         val f = IntentFilter().apply {
             addAction(ACTION_PERM)
@@ -98,7 +101,7 @@ object UsbDirect {
         exec.execute { session(g) }
     }
 
-    /** Para e devolve o teclado ao Android (soltar/F8/app saiu da frente). Não bloqueia: a thread devolve em até ~150 ms. */
+    /** Para e devolve o teclado ao Android (soltar/F8/app saiu da frente). Não bloqueia: a thread devolve em até ~200 ms. */
     fun stop() {
         wantActive = false
         gen++
@@ -111,66 +114,50 @@ object UsbDirect {
         exec.execute {
             try {
                 val m = um ?: return@execute
-                seen = describe(m)
-                val f = pick(m) ?: return@execute
-                if (!m.hasPermission(f.dev)) askPermission(m, f.dev)
+                val d = find(m) ?: return@execute
+                if (!m.hasPermission(d)) askPermission(m, d)
             } catch (_: Throwable) {}
         }
     }
 
-    private class Found(val dev: UsbDevice, val itf: UsbInterface, val ep: UsbEndpoint, val boot: Boolean) {
-        val key: String get() = dev.deviceName + "#" + itf.id
-    }
+    private fun isBoot(i: UsbInterface) =
+        i.interfaceClass == UsbConstants.USB_CLASS_HID && i.interfaceSubclass == 1 && i.interfaceProtocol == 1
 
-    /**
-     * Interfaces HID de teclado com endpoint de interrupção de entrada. Primeiro as "boot" (subclasse 1, protocolo 1: relatório fixo de
-     * 8 bytes); depois as sem subclasse (protocolo 0), que só valem se o descritor de relatório for de um teclado padrão (ver [isStdKeyboard]).
-     */
-    private fun candidates(m: UsbManager): List<Found> {
-        val boot = ArrayList<Found>()
-        val other = ArrayList<Found>()
-        for (d in m.deviceList.values) {
-            for (k in 0 until d.interfaceCount) {
-                val itf = d.getInterface(k)
-                if (itf.interfaceClass != UsbConstants.USB_CLASS_HID) continue
-                if (itf.interfaceProtocol == 2) continue // mouse
-                var ep: UsbEndpoint? = null
-                for (j in 0 until itf.endpointCount) {
-                    val e = itf.getEndpoint(j)
-                    if (e.direction == UsbConstants.USB_DIR_IN && e.type == UsbConstants.USB_ENDPOINT_XFER_INT) { ep = e; break }
-                }
-                if (ep == null) continue
-                if (itf.interfaceSubclass == 1 && itf.interfaceProtocol == 1) boot.add(Found(d, itf, ep, true))
-                else if (itf.interfaceSubclass == 0 && ep.maxPacketSize >= 8) other.add(Found(d, itf, ep, false))
+    /** Interfaces HID do aparelho que têm endpoint de interrupção de entrada, as "boot" primeiro. */
+    private fun hidInterfaces(d: UsbDevice): List<Pair<UsbInterface, UsbEndpoint>> {
+        val out = ArrayList<Pair<UsbInterface, UsbEndpoint>>()
+        for (k in 0 until d.interfaceCount) {
+            val itf = d.getInterface(k)
+            if (itf.interfaceClass != UsbConstants.USB_CLASS_HID) continue
+            for (j in 0 until itf.endpointCount) {
+                val ep = itf.getEndpoint(j)
+                if (ep.direction == UsbConstants.USB_DIR_IN && ep.type == UsbConstants.USB_ENDPOINT_XFER_INT) { out.add(itf to ep); break }
             }
         }
-        return boot + other
+        return out.sortedBy { if (isBoot(it.first)) 0 else 1 }
     }
 
-    private fun pick(m: UsbManager): Found? = candidates(m).firstOrNull { !rejected.contains(it.key) }
+    /** Acha o teclado: mesmo vid:pid do que o Android reconheceu; senão qualquer aparelho com interface boot de teclado. */
+    private fun find(m: UsbManager): UsbDevice? {
+        val devs = m.deviceList.values
+        val kv = InputWatcher.kbVid
+        val kp = InputWatcher.kbPid
+        if (kv >= 0) for (d in devs) if (d.vendorId == kv && d.productId == kp && hidInterfaces(d).isNotEmpty()) return d
+        for (d in devs) for (k in 0 until d.interfaceCount) if (isBoot(d.getInterface(k))) return d
+        return null
+    }
 
     private fun describe(m: UsbManager): String {
-        val list = try { m.deviceList.values.toList() } catch (_: Throwable) { emptyList<UsbDevice>() }
-        val sb = StringBuilder()
-        sb.append("host USB do sistema: ").append(if (hostFeature) "sim" else "NÃO").append(" · aparelhos que o app vê: ").append(list.size)
-        for (d in list.take(4)) {
-            sb.append(" · ").append(String.format("%04x:%04x", d.vendorId, d.productId)).append(" [")
-            for (k in 0 until d.interfaceCount) {
-                val i = d.getInterface(k)
-                if (k > 0) sb.append(' ')
-                sb.append(i.interfaceClass).append('/').append(i.interfaceSubclass).append('/').append(i.interfaceProtocol)
-            }
-            sb.append(']')
-        }
-        return sb.toString()
-    }
-
-    private fun whyNone(m: UsbManager): String {
-        val n = try { m.deviceList.size } catch (_: Throwable) { 0 }
-        return when {
-            n == 0 && !hostFeature -> "esta TV não oferece USB aos apps (sem host USB): o app não consegue ler o teclado direto"
-            n == 0 -> "o Android da TV não mostra nenhum aparelho USB para o app"
-            else -> "nenhum teclado USB padrão entre os $n aparelhos que o app vê"
+        val devs = m.deviceList.values
+        if (devs.isEmpty()) return "nenhum dispositivo USB visível ao app"
+        val want = if (InputWatcher.kbVid >= 0) "teclado do Android = %04x:%04x · ".format(InputWatcher.kbVid, InputWatcher.kbPid) else ""
+        return want + devs.joinToString(" | ") { d ->
+            val nm = try { d.productName ?: "?" } catch (_: Throwable) { "?" }
+            "%04x:%04x %s [".format(d.vendorId, d.productId, nm) +
+                (0 until d.interfaceCount).joinToString(" ") { k ->
+                    val i = d.getInterface(k)
+                    "${i.id}:${i.interfaceClass}/${i.interfaceSubclass}/${i.interfaceProtocol}"
+                } + "]"
         }
     }
 
@@ -191,64 +178,91 @@ object UsbDirect {
     private fun session(g: Int) {
         while (alive(g)) {
             val m = um
-            if (m == null) { status = "esta TV não tem USB host"; seen = "sem UsbManager"; nap(1000); continue }
-            val f = try { pick(m) } catch (_: Throwable) { null }
-            seen = try { describe(m) } catch (_: Throwable) { "?" }
-            if (f == null) { status = try { whyNone(m) } catch (_: Throwable) { "procurando teclado USB…" }; nap(500); continue }
-            if (!m.hasPermission(f.dev)) { askPermission(m, f.dev); nap(500); continue }
-            runOn(g, m, f)
+            if (m == null) { status = "esta TV não tem USB host"; nap(1000); continue }
+            val d = try { find(m) } catch (_: Throwable) { null }
+            if (d == null) {
+                status = "não achei o teclado entre os aparelhos USB"
+                val now = SystemClock.uptimeMillis()
+                if (now - seenAt > 2000L) { seenAt = now; seen = try { describe(m) } catch (_: Throwable) { "erro ao listar" } }
+                nap(500); continue
+            }
+            if (!m.hasPermission(d)) { askPermission(m, d); nap(500); continue }
+            runOn(g, m, d)
             nap(300)
         }
         active = false
     }
 
-    /** O descritor de relatório é de um teclado padrão (mesmo relatório de 8 bytes do boot, sem Report ID)? Interface sem isso não é lida. */
-    private fun isStdKeyboard(c: UsbDeviceConnection, f: Found): Boolean {
-        val d = ByteArray(512)
-        val n = try { c.controlTransfer(0x81, 0x06, 0x2200, f.itf.id, d, d.size, 500) } catch (_: Throwable) { -1 }
-        if (n <= 0) return false
-        var i = 0
-        var page = -1
-        var kbd = false
-        var reportId = false
-        while (i < n) {
-            val b = d[i].toInt() and 0xFF
-            if (b == 0xFE) { // item longo
-                if (i + 1 >= n) break
-                i += 3 + (d[i + 1].toInt() and 0xFF)
-                continue
-            }
-            val size = when (b and 3) { 0 -> 0; 1 -> 1; 2 -> 2; else -> 4 }
-            val v = if (size >= 1 && i + 1 < n) d[i + 1].toInt() and 0xFF else 0
-            when (b and 0xFC) {
-                0x04 -> page = if (size == 1) v else -1        // Usage Page
-                0x08 -> if (page == 0x01 && v == 0x06) kbd = true // Usage (Keyboard)
-                0x84 -> reportId = true                         // Report ID
-            }
-            i += 1 + size
-        }
-        return kbd && !reportId
+    private class Pick(val itf: UsbInterface, val ep: UsbEndpoint, val reportId: Int, val boot: Boolean)
+
+    private fun readDescriptor(c: UsbDeviceConnection, itf: UsbInterface): ByteArray? {
+        val buf = ByteArray(1024)
+        val n = c.controlTransfer(0x81, 0x06, 0x2200, itf.id, buf, buf.size, 500) // GET_DESCRIPTOR (relatório HID) da interface
+        return if (n > 0) buf.copyOf(n) else null
     }
 
-    private fun runOn(g: Int, m: UsbManager, f: Found) {
-        val c = try { m.openDevice(f.dev) } catch (_: Throwable) { null }
+    /**
+     * Procura no descritor de relatório a coleção "Teclado" (página 1, uso 6) e confere se o relatório de entrada dela tem 64 bits
+     * (modificadores + reservado + 6 teclas). Devolve o "report ID" dessa coleção (0 = sem ID) ou null se não for o formato padrão.
+     */
+    private fun parseKeyboard(d: ByteArray?): Int? {
+        if (d == null) return null
+        var i = 0
+        var usagePage = 0; var rSize = 0; var rCount = 0; var rId = 0; var lastUsage = 0
+        var depth = 0; var kbDepth = -1
+        val bits = HashMap<Int, Int>()
+        while (i < d.size) {
+            val b = d[i].toInt() and 0xFF
+            if (b == 0xFE) { val len = if (i + 1 < d.size) d[i + 1].toInt() and 0xFF else 0; i += 3 + len; continue }
+            val sz = when (b and 3) { 0 -> 0; 1 -> 1; 2 -> 2; else -> 4 }
+            val type = (b shr 2) and 3
+            val tag = (b shr 4) and 0xF
+            var v = 0
+            for (k in 0 until sz) if (i + 1 + k < d.size) v = v or ((d[i + 1 + k].toInt() and 0xFF) shl (8 * k))
+            i += 1 + sz
+            when (type) {
+                1 -> when (tag) { 0 -> usagePage = v; 7 -> rSize = v; 8 -> rId = v; 9 -> rCount = v }
+                2 -> if (tag == 0) lastUsage = v
+                0 -> {
+                    when (tag) {
+                        0xA -> { depth++; if (kbDepth < 0 && v == 1 && usagePage == 1 && lastUsage == 6) kbDepth = depth }
+                        0xC -> { if (kbDepth == depth) kbDepth = -1; depth-- }
+                        0x8 -> if (kbDepth >= 0) bits[rId] = (bits[rId] ?: 0) + rSize * rCount
+                    }
+                    lastUsage = 0
+                }
+            }
+        }
+        for ((id, n) in bits) if (n == 64) return id
+        return null
+    }
+
+    private fun runOn(g: Int, m: UsbManager, dev: UsbDevice) {
+        val c = try { m.openDevice(dev) } catch (_: Throwable) { null }
         if (c == null) { status = "não consegui abrir o teclado USB"; nap(1000); return }
-        var claimed = false
+        var claimed: UsbInterface? = null
         try {
+            // escolhe a interface do teclado: a "boot" (8 bytes fixos) ou a primeira com o formato padrão no descritor
+            var pick: Pick? = null
+            for ((itf, ep) in hidInterfaces(dev)) {
+                if (isBoot(itf)) { pick = Pick(itf, ep, 0, true); break }
+                val id = parseKeyboard(try { readDescriptor(c, itf) } catch (_: Throwable) { null })
+                if (id != null) { pick = Pick(itf, ep, id, false); break }
+            }
+            if (pick == null) {
+                status = "este teclado não usa o formato padrão de 8 bytes (usando o Android)"
+                nap(5000); return
+            }
             // pegar a interface faz o Android "remover" o teclado: avisa o InputWatcher para não contar como USB soltando
             InputWatcher.quietUntil = SystemClock.uptimeMillis() + 4000
-            claimed = c.claimInterface(f.itf, true)
-            if (!claimed) { status = "não consegui pegar o teclado (outro app usando?)"; nap(1000); return }
-            if (!f.boot && !isStdKeyboard(c, f)) {
-                rejected.add(f.key)
-                status = "interface HID ${f.itf.id} não é teclado padrão (ignorada)"
-                return
-            }
-            if (f.boot) c.controlTransfer(0x21, 0x0B, 0, f.itf.id, null, 0, 300) // SET_PROTOCOL: boot (relatório fixo de 8 bytes)
-            c.controlTransfer(0x21, 0x0A, 0, f.itf.id, null, 0, 300) // SET_IDLE: só manda quando muda
+            if (!c.claimInterface(pick.itf, true)) { status = "não consegui pegar o teclado (outro app usando?)"; nap(1000); return }
+            claimed = pick.itf
+            if (pick.boot) c.controlTransfer(0x21, 0x0B, 0, pick.itf.id, null, 0, 300) // SET_PROTOCOL: boot (relatório fixo de 8 bytes)
+            c.controlTransfer(0x21, 0x0A, 0, pick.itf.id, null, 0, 300) // SET_IDLE: só manda quando muda
             active = true
-            status = "lendo ${f.dev.productName ?: "o teclado"} direto pelo USB"
-            if (!readLoop(g, m, c, f)) { errors++; status = "o teclado USB parou de responder" }
+            status = "lendo ${try { dev.productName } catch (_: Throwable) { null } ?: "o teclado"} direto pelo USB" +
+                if (pick.reportId != 0) " (relatório #${pick.reportId})" else ""
+            if (!readLoop(g, c, pick.ep, pick.reportId)) { errors++; status = "o teclado USB parou de responder" }
         } catch (t: Throwable) {
             errors++
             status = "erro: ${t.javaClass.simpleName}"
@@ -257,74 +271,77 @@ object UsbDirect {
             // nenhuma tecla pode ficar presa no celular
             try { HidLink.send(HidDescriptor.ID_KEYBOARD, ByteArray(HidDescriptor.KEYBOARD_SIZE)) } catch (_: Throwable) {}
             InputWatcher.quietUntil = SystemClock.uptimeMillis() + 4000
-            try { if (claimed) c.releaseInterface(f.itf) } catch (_: Throwable) {} // devolve o teclado ao Android
+            val cl = claimed
+            try { if (cl != null) c.releaseInterface(cl) } catch (_: Throwable) {} // devolve o teclado ao Android
             try { c.close() } catch (_: Throwable) {}
         }
     }
 
-    /** F8 solta, F9/Insert ritmo, F10/Pause keepalive, F11 modo USB (códigos de uso HID). */
+    /** F8 solta, F9/Insert ritmo, F10/Pause keepalive, F11 modo USB, Scroll Lock bloqueio (códigos de uso HID). */
     private fun cmdFor(u: Int): Int = when (u) {
         0x41 -> HubCommands.RELEASE_TOGGLE
         0x42, 0x49 -> HubCommands.RATE
         0x43, 0x48 -> HubCommands.KEEPALIVE
         0x44 -> HubCommands.USB
+        0x47 -> HubCommands.FILTER
         else -> 0
     }
 
-    /**
-     * Lê com bulkTransfer (funciona em endpoint de interrupção e existe em qualquer Android; UsbDeviceConnection.requestWait(timeout)
-     * só existe a partir do Android 13 e derrubava a leitura na TV, que é Android 11).
-     * true = foi pedido para parar; false = o dispositivo caiu/parou de responder.
-     */
-    private fun readLoop(g: Int, m: UsbManager, c: UsbDeviceConnection, f: Found): Boolean {
-        val ep = f.ep
-        val size = if (ep.maxPacketSize >= 8) ep.maxPacketSize else 8
-        val buf = ByteArray(size)
+    /** true = foi pedido para parar; false = o dispositivo caiu/parou de responder. */
+    private fun readLoop(g: Int, c: UsbDeviceConnection, ep: UsbEndpoint, reportId: Int): Boolean {
+        val size = if (ep.maxPacketSize in 9..64) ep.maxPacketSize else 16
+        val buf = ByteBuffer.allocate(size)
+        val req = UsbRequest()
+        if (!req.initialize(c, ep)) return false
+        val off = if (reportId != 0) 1 else 0   // com "report ID", o primeiro byte é o ID e os 8 seguintes são o teclado
         var prev = ByteArray(8)
         var sent = ByteArray(8)
+        var queued = false
         var bad = 0
-        var lastCheck = SystemClock.uptimeMillis()
-        while (alive(g)) {
-            val t0 = SystemClock.uptimeMillis()
-            val n = c.bulkTransfer(ep, buf, size, 100)
-            val now = SystemClock.uptimeMillis()
-            if (n < 0) {
-                // -1 em ~100 ms = nenhuma tecla mexeu (normal); -1 na hora = erro de verdade
-                if (now - t0 < 30L) { if (++bad >= 5) return false; nap(20) } else bad = 0
-                if (now - lastCheck > 1000L) {
-                    lastCheck = now
-                    val still = try { m.deviceList.containsKey(f.dev.deviceName) } catch (_: Throwable) { true }
-                    if (!still) return false
+        try {
+            while (alive(g)) {
+                if (!queued) {
+                    buf.clear()
+                    if (!req.queue(buf)) { if (++bad >= 3) return false; nap(20); continue }
+                    queued = true
                 }
-                continue
-            }
-            bad = 0
-            if (n < 3) continue
-            val cur = ByteArray(8)
-            System.arraycopy(buf, 0, cur, 0, if (n < 8) n else 8)
-            reports++
-            lastReportAt = now
-            // teclas de comando do hub: agem aqui e NÃO vão para o celular
-            var cmd = 0
-            val out = cur.copyOf()
-            for (i in 2..7) {
-                val u = cur[i].toInt() and 0xFF
-                if (u == 0) continue
-                val cm = cmdFor(u)
-                if (cm != 0) {
-                    out[i] = 0
-                    var wasDown = false
-                    for (k in 2..7) if ((prev[k].toInt() and 0xFF) == u) wasDown = true
-                    if (!wasDown) cmd = cm
+                val done: UsbRequest? = try { c.requestWait(200L) } catch (_: TimeoutException) { continue } catch (_: Exception) { null }
+                queued = false
+                if (done == null) { if (++bad >= 3) return false; continue }
+                bad = 0
+                val n = buf.position()
+                val raw = buf.array()
+                if (reportId != 0 && (n < 1 || (raw[0].toInt() and 0xFF) != reportId)) continue // relatório de outra coleção (mídia etc.)
+                if (n - off < 3) continue
+                val cur = ByteArray(8)
+                System.arraycopy(raw, off, cur, 0, if (n - off < 8) n - off else 8)
+                reports++
+                lastReportAt = SystemClock.uptimeMillis()
+                // teclas de comando do hub: agem aqui e NÃO vão para o celular
+                var cmd = 0
+                val out = cur.copyOf()
+                for (i in 2..7) {
+                    val u = cur[i].toInt() and 0xFF
+                    if (u == 0) continue
+                    val cm = cmdFor(u)
+                    if (cm != 0) {
+                        out[i] = 0
+                        var wasDown = false
+                        for (k in 2..7) if ((prev[k].toInt() and 0xFF) == u) wasDown = true
+                        if (!wasDown) cmd = cm
+                    }
                 }
+                prev = cur
+                if (!out.contentEquals(sent)) {
+                    sent = out
+                    HidLink.send(HidDescriptor.ID_KEYBOARD, out.copyOf())
+                }
+                if (cmd != 0) { val cc = cmd; mainH.post { HubCommands.handler?.invoke(cc) } }
             }
-            prev = cur
-            if (!out.contentEquals(sent)) {
-                sent = out
-                HidLink.send(HidDescriptor.ID_KEYBOARD, out.copyOf())
-            }
-            if (cmd != 0) { val cc = cmd; mainH.post { HubCommands.handler?.invoke(cc) } }
+            return true
+        } finally {
+            try { req.cancel() } catch (_: Throwable) {}
+            try { req.close() } catch (_: Throwable) {}
         }
-        return true
     }
 }

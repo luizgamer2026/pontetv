@@ -13,6 +13,9 @@ object InputWatcher : InputManager.InputDeviceListener {
 
     @Volatile var listener: Listener? = null
     @Volatile var kb: String? = null
+    /** vid:pid do último teclado alfabético que o Android reconheceu. Fica guardado mesmo depois que o modo USB direto pega o teclado. */
+    @Volatile var kbVid = -1
+    @Volatile var kbPid = -1
     @Volatile var mouse: String? = null
     @Volatile private var seenMouse: String? = null
     private var started = false
@@ -61,6 +64,8 @@ object InputWatcher : InputManager.InputDeviceListener {
 
     fun scan() {
         var k: String? = null
+        var kv = -1
+        var kp = -1
         var ms: String? = null
         val names = ArrayList<String>()
         for (id in InputDevice.getDeviceIds()) {
@@ -70,10 +75,11 @@ object InputWatcher : InputManager.InputDeviceListener {
             names.add(d.name)
             val s = d.sources
             if (d.keyboardType == InputDevice.KEYBOARD_TYPE_ALPHABETIC &&
-                (s and InputDevice.SOURCE_KEYBOARD) == InputDevice.SOURCE_KEYBOARD) k = k ?: d.name
+                (s and InputDevice.SOURCE_KEYBOARD) == InputDevice.SOURCE_KEYBOARD && k == null) { k = d.name; kv = d.vendorId; kp = d.productId }
             if (isMouse(s)) ms = ms ?: d.name
         }
         present = names.joinToString(", ")
+        if (k != null) { kbVid = kv; kbPid = kp }
         kb = k; mouse = ms ?: seenMouse
         listener?.onDevices(k, ms)
     }

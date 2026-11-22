@@ -1,0 +1,105 @@
+package com.pontetv.tv
+
+import android.accessibilityservice.AccessibilityService
+import android.accessibilityservice.AccessibilityServiceInfo
+import android.content.Intent
+import android.os.Handler
+import android.os.HandlerThread
+import android.os.Looper
+import android.view.KeyEvent
+import android.view.accessibility.AccessibilityEvent
+
+/**
+ * Filtro de teclas do sistema da TV. Enquanto o teclado está controlando o celular, as teclas do teclado USB
+ * são consumidas aqui, antes de chegarem ao launcher ou às funções do fabricante (Esc, F1..F12, Windows…),
+ * e seguem só para o celular.
+ *
+ * O filtro só fica LIGADO enquanto o teclado controla o celular (setFilter). Fora disso o serviço não entra no
+ * caminho das teclas da TV: nada de atraso no controle remoto e nada de travar ao ligar o serviço nas configurações.
+ */
+class KeyFilterService : AccessibilityService() {
+    companion object {
+        @Volatile var instance: KeyFilterService? = null
+        /** true = o filtro de teclas do sistema está de fato ligado agora (diagnóstico do HUD). */
+        @Volatile var filterOn = false
+        /** Quanto o pior onKeyEvent demorou para responder ao sistema (o sistema só espera 500 ms por tecla) e quantas teclas passaram por aqui. */
+        @Volatile var maxMs = 0
+        @Volatile var calls = 0
+        fun resetDiag() { maxMs = 0; calls = 0 }
+
+        // serviceInfo (ler/gravar) é chamada síncrona ao system_server: se ele estiver parado, quem chamou fica preso.
+        // Por isso o filtro é ligado/desligado numa thread própria, nunca na principal (que precisa atender F8/VOLTAR/F9).
+        private val ft = HandlerThread("PonteTV-Filter").apply { start() }
+        private val fh = Handler(ft.looper)
+        private val mainH = Handler(Looper.getMainLooper())
+        @Volatile private var wanted = false
+    }
+
+    private val applyRun = Runnable { applyFilter(wanted) }
+
+    override fun onServiceConnected() {
+        super.onServiceConnected()
+        instance = this
+        setFilter(InputBridge.capturing)
+    }
+
+    /** Liga/desliga o filtro do sistema. Só liga se o usuário não o desligou (Diag.filterEnabled: ↑/↓ do controle ou Scroll Lock). */
+    fun setFilter(on: Boolean) {
+        wanted = on && Diag.filterEnabled
+        fh.removeCallbacks(applyRun)
+        fh.post(applyRun)
+    }
+
+    private fun applyFilter(want: Boolean) {
+        try {
+            val info = serviceInfo ?: return
+            val flag = AccessibilityServiceInfo.FLAG_REQUEST_FILTER_KEY_EVENTS
+            if (((info.flags and flag) != 0) == want) { filterOn = want; return }
+            info.flags = if (want) info.flags or flag else info.flags and flag.inv()
+            serviceInfo = info
+            filterOn = want
+        } catch (_: Throwable) {}
+    }
+
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
+
+    override fun onInterrupt() {}
+
+    override fun onUnbind(intent: Intent?): Boolean {
+        instance = null
+        filterOn = false
+        return super.onUnbind(intent)
+    }
+
+    override fun onKeyEvent(event: KeyEvent): Boolean {
+        val t0 = System.nanoTime()
+        val r = handle(event)
+        val ms = ((System.nanoTime() - t0) / 1_000_000L).toInt()
+        calls++
+        if (ms > maxMs) maxMs = ms
+        return r
+    }
+
+    private fun handle(event: KeyEvent): Boolean {
+        return try {
+            when {
+                !Diag.filterEnabled || !InputBridge.capturing || !HidLink.connected -> false
+                !InputBridge.isKeyboard(event) ->
+                    // "soltar" sem dispositivo (USB que sumiu) de uma tecla que está apertada: aceita, senão ela fica presa
+                    if (event.action == KeyEvent.ACTION_UP && InputBridge.isHeld(event)) { InputBridge.key(event); true } else false
+                else -> {
+                    val cmd = HubCommands.forKey(event.keyCode)
+                    if (cmd != 0) {
+                        // teclas de comando (F8, F9/Insert, F10/Pause): o próprio serviço trata e consome, a TV nunca as vê
+                        // adia para depois de responder ao sistema (ele só espera 500 ms pela resposta de cada tecla)
+                        if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
+                            val h = HubCommands.handler
+                            if (h != null) mainH.post { h(cmd) }
+                        }
+                        true
+                    } else { InputBridge.key(event); true }
+                }
+            }
+        } catch (t: Throwable) { false } // nunca derrubar o serviço: o Android desliga serviço que quebra
+    }
+}

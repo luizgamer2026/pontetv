@@ -16,8 +16,8 @@ Módulos: `phone` (Android 10+, pareia e mostra "Teclado e mouse conectados") ·
 * **Teclado:** a tecla física é enviada pelo *scancode* (tabela evdev → uso HID). Quem decide ç, acentos e AltGr é o layout do
   celular (Ajustes → Teclado físico → Português do Brasil ABNT2). Isso evita teclas trocadas/erradas.
   A tecla `/ ?` do ABNT2 e o `.` do teclado numérico são enviadas.
-* **Teclas do sistema da TV:** o teclado é lido direto pela porta USB (modo USB direto, v2.12/v2.13): a TV nunca vê a tecla,
-  então Esc, F1…F12, Windows etc. vão só para o celular. Não há mais bloqueio por acessibilidade (removido na v2.13).
+* **Teclas do sistema da TV:** ligando o serviço de acessibilidade "PonteTV Hub" na TV (botão **Bloquear teclas na TV**),
+  Esc, F1…F12, Windows etc. são consumidos antes do launcher e vão só para o celular.
 * **Soltar para a TV:** **F8** (teclado) ou **VOLTAR** do controle remoto devolvem teclado e mouse à TV. F8 de novo volta a controlar o celular.
   Se o app sai da frente na TV, tudo é solto no celular.
 * **Celular** (`PonteTV`): procura a TV por Bluetooth, faz o pareamento e mostra o estado lido do próprio Android
@@ -36,19 +36,15 @@ Módulos: `phone` (Android 10+, pareia e mostra "Teclado e mouse conectados") ·
 * A imagem do celular na TV não faz parte do app (use o espelhamento nativo/cabo, se quiser).
 * Velocidade do mouse: configuração de ponteiro do próprio celular.
 
-## v2.13: bloqueio de teclas removido, USB direto corrigido
+## v2.13: o USB direto não achava o teclado
 
-* **Bloqueio de teclas (serviço de acessibilidade) removido** por completo: botão "Bloquear teclas na TV", serviço, ativação por ADB
-  (`tools/ativar-bloqueio.sh`), permissões `WRITE_SECURE_SETTINGS`/`RECEIVE_BOOT_COMPLETED`/`QUERY_ALL_PACKAGES`, comando Scroll Lock e ↑/↓ do controle.
-  Quem impede F1…F12/Esc de agirem na TV agora é só o USB direto.
-* **Leitura do USB direto corrigida:** a v2.12 lia o teclado com `UsbDeviceConnection.requestWait(timeout)`, que só existe a partir do Android 13;
-  na TV (Android 11) isso daria `NoSuchMethodError` assim que o teclado fosse pego. Agora a leitura usa `bulkTransfer` (existe em qualquer Android).
-* **Detecção mais tolerante:** além do teclado "boot" (HID, subclasse 1, protocolo 1), o app aceita uma interface HID sem subclasse
-  se o descritor de relatório for de um teclado padrão (8 bytes, sem Report ID). Interface que não é teclado padrão é ignorada, sem mexer nela de novo.
-* **USB direto vem LIGADO por padrão**, inclusive para quem tinha desligado (F11) na v2.12: a preferência salva foi renovada. F11 ou o botão do painel ainda desligam.
-* **HUD que explica a falha:** `Teclado USB direto: …` agora diz o motivo (sem host USB na TV, nenhum aparelho USB visível, nenhum teclado padrão…)
-  e a linha nova `USB visto pelo app: host USB do sistema: sim/NÃO · aparelhos que o app vê: N · vid:pid [classe/subclasse/protocolo …]`
-  mostra exatamente o que o Android da TV deixa o app enxergar. Se aparecer `NÃO … 0 aparelhos`, esta TV não entrega USB aos apps e o USB direto não tem como funcionar nela.
+Na HUD de teste: `Teclado USB direto: ligado, mas procurando teclado USB…` (a permissão não era o problema: se fosse, diria "aguardando você aceitar o acesso USB").
+O app só aceitava teclado com interface HID "boot" (3/1/1); o SEMICO pode ter outra. Agora:
+
+* acha o aparelho USB com o **mesmo vid:pid do teclado que o Android já reconheceu** (o `InputWatcher` guarda); senão, qualquer um com interface boot de teclado;
+* na interface HID escolhe a "boot" ou, se não houver, **lê o descritor de relatório** e aceita a coleção Teclado de 64 bits (com ou sem report ID);
+* a HUD mostra `USB visto pelo app:` com `vid:pid nome [interface:classe/subclasse/protocolo]` de cada aparelho, ou `nenhum dispositivo USB visível ao app` (a TV esconderia o USB dos apps);
+* o filtro do manifest passou a casar qualquer aparelho HID (permite "usar por padrão" e guardar a permissão).
 
 ## v2.12: modo USB direto do teclado (sem o filtro de acessibilidade)
 
@@ -63,9 +59,9 @@ e **não há nada para bloquear**, sem filtro e sem `system_server` no caminho. 
 
 * **Permissão:** o Android pede "permitir acesso USB" ao abrir o app (marque "usar por padrão" para não perguntar de novo; o app tem filtro para teclados USB).
 * **Reserva automática:** sem permissão, sem teclado USB ou com qualquer erro, o teclado segue funcionando pelo caminho normal do Android (bloqueio desligado).
-* **F11** (ou o botão "Teclado: USB direto" do painel) liga/desliga o modo; a escolha fica salva. F8, F9/Insert e F10/Pause continuam como comandos, agora lidos do USB.
+* **F11** (ou o botão "Teclado: USB direto" do painel) liga/desliga o modo; a escolha fica salva. F8, F9/Insert, F10/Pause e Scroll Lock continuam como comandos, agora lidos do USB.
 * **HUD:** `Teclado USB direto: LIGADO — lendo … (N relatórios, último há Ns)` ou o motivo de não estar ativo. A entrada/saída do teclado causada por pegar/devolver a interface não conta como "USB removido".
-* (O bloqueio por acessibilidade foi removido na v2.13.)
+* O bloqueio por acessibilidade continua existindo (↑/↓ do controle ou Scroll Lock), desligado por padrão: não é mais necessário.
 
 ## v2.11: teclado/mouse "morrendo" no meio do jogo
 
@@ -167,12 +163,18 @@ o filtro é a causa e a gente troca o jeito de bloquear as teclas da TV.
 (125 → 250 → 90 → 62 Hz) e **F10** liga/desliga o keepalive. A escolha fica salva e aparece no HUD. F9/F10 não vão para o celular.
 Dica: em jogo, evite fone Bluetooth tocando no mesmo celular e deixe a TV no Wi-Fi 5 GHz ou cabo; os dois disputam o rádio com o mouse.
 
-## Modo BLE (experimental)
+## Modo BLE (experimental) e bloqueio de teclas
 
 * **BLE HID (HOGP):** o botão *Modo* do painel da TV troca o Bluetooth clássico por BLE (a TV anuncia o serviço HID e o
   celular pareia como central). O clássico continua sendo o padrão. Só funciona se o Bluetooth da TV conseguir anunciar BLE;
   se não conseguir, o app avisa e fica no clássico. Ao trocar, esqueça a TV antiga no celular e use *Procurar TV* de novo.
   O intervalo de conexão BLE quem decide é o celular; a TV só pede prioridade alta (o HUD mostra o resultado).
+* **Bloqueio de teclas (v2.5):** o filtro de teclas do serviço de Acessibilidade agora só fica ligado *enquanto o teclado controla
+  o celular* (antes ficava sempre no caminho de todas as teclas da TV, e por isso a TV podia congelar ao ligar o serviço).
+  O botão varre as telas de Acessibilidade que a TV realmente tem (ignorando os "Stubs", que só mostram o erro "nenhuma ação pode ser executada") e tenta uma por toque (o aviso mostra qual); se nenhuma abrir, abre as Configurações da TV e mostra o caminho. Se a TV desligar o
+  serviço ao ser desligada, a permissão dada uma vez por ADB (`pm grant ... WRITE_SECURE_SETTINGS`) faz o app religá-lo sozinho
+  ao abrir e a cada boot. Sem a permissão, o passo a passo por ADB aparece na tela (com o IP da TV). Em `tools/ativar-bloqueio.sh` há um script para o Termux que liga tudo de uma vez:
+  `bash tools/ativar-bloqueio.sh IP_DA_TV`. Depois de uma vez, o serviço fica ligado (e o app o religa sozinho).
 
 ## Compilar
 
